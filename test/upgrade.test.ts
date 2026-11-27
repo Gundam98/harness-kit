@@ -75,7 +75,7 @@ test("upgrade --check reports a missing durable state without writing", () => {
   const report = upgrade(repo, true);
   assert.equal(report.schema, UPGRADE_REPORT_SCHEMA);
   assert.equal(report.status, "upgrade-available");
-  assert.deepEqual(report.pendingMigrations, ["upgrade-state-v1"]);
+  assert.deepEqual(report.pendingMigrations, ["upgrade-state-v1", "diff-check-task-base-v1"]);
   // The lock-less entry says @latest; upgrading pins it, so AGENTS.md is part of the plan.
   assert.deepEqual(report.changedFiles, ["AGENTS.md", UPGRADE_STATE_REL]);
   assert.equal(report.hooksChanged, false);
@@ -98,7 +98,7 @@ test("upgrade applies once, preserves manifest bytes, and is current after commi
     package: PACKAGE,
     version: TARGET,
     manifestSpec: "ai-harness/v0",
-    appliedMigrations: ["upgrade-state-v1"],
+    appliedMigrations: ["upgrade-state-v1", "diff-check-task-base-v1"],
   });
   commit(repo, "upgrade");
   const second = upgrade(repo);
@@ -352,3 +352,54 @@ test("upgrade drops retired context reviews along with a real upgrade, never on 
   assert.equal(upgrade(repo, true).status, "current");
 });
 
+
+test("upgrade rewrites only an exact base-less diff check, in place, and notes the hand-written ones", () => {
+  const manifest = `spec: ai-harness/v0
+
+identity:
+  name: upgrade-fixture
+  summary: Upgrade fixture
+# whitespace checks from an early onboarding
+capabilities:
+  diff_check: { run: "git diff --check", desc: "whitespace" }   # keep this comment
+  lint_ws:
+    run: git diff --check
+  quoted: { run: 'git diff --check' }
+  scoped: { run: "git diff --check -- src" }
+  pinned: { run: "git diff --check origin/main" }
+validation:
+  defaults:
+    no_match: [diff_check]
+`;
+  const lock = JSON.stringify({
+    schema: "ai-harness/upgrade-state/v1",
+    package: PACKAGE,
+    version: "0.9.0",
+    manifestSpec: "ai-harness/v0",
+    appliedMigrations: ["upgrade-state-v1"],
+  }) + "\n";
+  const repo = fixture({ manifest, lock });
+  const check = upgrade(repo, true);
+  assert.equal(check.status, "upgrade-available");
+  assert.deepEqual(check.pendingMigrations, ["diff-check-task-base-v1"]);
+  assert.ok(check.changedFiles.includes(".agents/manifest.yaml"), JSON.stringify(check.changedFiles));
+  assert.equal(readFileSync(join(repo, ".agents/manifest.yaml"), "utf8"), manifest, "--check writes nothing");
+
+  const report = upgrade(repo);
+  assert.equal(report.status, "upgraded", report.errors.join("; "));
+  // Only the three exact values change, each keeping its quoting; comments and layout stay.
+  const base = "git diff --check ${HARNESS_KIT_BASE:-HEAD}";
+  assert.equal(
+    readFileSync(join(repo, ".agents/manifest.yaml"), "utf8"),
+    manifest
+      .replace('{ run: "git diff --check", desc', `{ run: "${base}", desc`)
+      .replace("run: git diff --check\n", `run: "${base}"\n`)
+      .replace("{ run: 'git diff --check' }", `{ run: '${base}' }`),
+  );
+  const notes = report.notes.join("\n");
+  for (const id of ["diff_check", "lint_ws", "quoted"]) assert.match(notes, new RegExp(`capabilities\\.${id}\\.run: "git diff --check" -> "git diff --check \\$\\{HARNESS_KIT_BASE:-HEAD\\}"`));
+  assert.match(notes, /capabilities\.scoped\.run runs git diff --check without a base but is not the old starter command, so upgrade left it unchanged/);
+  assert.doesNotMatch(notes, /capabilities\.pinned/, "a fixed base is a base");
+  commit(repo, "upgrade");
+  assert.equal(upgrade(repo).status, "current");
+});

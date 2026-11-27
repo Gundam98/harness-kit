@@ -23,6 +23,8 @@ test("ci is the public CI merge gate with explicit base controls", () => {
   const help = spawnSync(TSX, [CLI, "ci", "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   for (const flag of [/--base <ref>/, /--remote <name>/, /--no-fetch/, /--profile <checkset>/, /--json/]) assert.match(help.stdout, flag);
+  // Isolation names what it leaves alone and the git it needs.
+  assert.match(help.stdout, /--isolate-check-git-config +start the repo's checks without the host's system\s+and global\/XDG git config \(ci's own fetch keeps\s+it; needs git >= 2\.32\)/);
   const root = spawnSync(TSX, [CLI, "--help"], { encoding: "utf8" });
   assert.match(root.stdout, /\n {2}ci \[options\] +merge gate for CI/);
   // Exit 1 is reserved for a failed change; a malformed call is a configuration error.
@@ -147,7 +149,7 @@ test("init --force still snapshots legacy entry bytes before replacing scaffold 
     package: "@erzhe/harness-kit",
     version: PACKAGE_VERSION,
     manifestSpec: "ai-harness/v0",
-    appliedMigrations: ["upgrade-state-v1"],
+    appliedMigrations: ["upgrade-state-v1", "diff-check-task-base-v1"],
   });
 });
 

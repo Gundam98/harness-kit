@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { captureLegacyEntries } from "../adoption";
+import { DIFF_CHECK_RUN } from "../diff-check";
 import { inspectManagedFiles, writeManagedFiles, type ManagedFileTarget } from "../managed-files";
 import pkg from "../../package.json";
 import { repoHarnessInvocation } from "../harness-cli";
@@ -101,7 +102,7 @@ function manifestTemplate(name: string, starter: Starter): string {
   const declared: Array<[string, string, string?]> = [
     ...starter.capabilities,
     // Whitespace errors in the task diff; HARNESS_KIT_BASE is the task base when run-checks runs it.
-    ["diff_check", "git diff --check ${HARNESS_KIT_BASE:-HEAD}", DIFF_CHECK_DESC],
+    ["diff_check", DIFF_CHECK_RUN, DIFF_CHECK_DESC],
   ];
   const capabilities = declared
     .map(([verb, run, desc]) => `  ${verb}: { run: ${JSON.stringify(run)}${desc ? `, desc: ${JSON.stringify(desc)}` : ""} }`)

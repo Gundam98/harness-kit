@@ -245,12 +245,17 @@ export function isLinkedGitWorktree(repo: string): boolean {
   try {
     const root = gitRoot(repo);
     const current = canonical(gitAdminDir(root));
+    // git prints a relative path relative to the cwd (`root`); --path-format=absolute
+    // needs git 2.31, and older git echoes it as output instead.
     const common = canonical(
-      execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-        cwd: root,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim(),
+      resolve(
+        root,
+        execFileSync("git", ["rev-parse", "--git-common-dir"], {
+          cwd: root,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        }).trim(),
+      ),
     );
     return current !== common;
   } catch {

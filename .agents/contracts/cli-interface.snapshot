@@ -184,16 +184,20 @@ merge gate for CI: resolve the base from the CI environment, run run-checks +
 verify on its merge-base; no local state
 
 Options:
-  -C, --repo <dir>      target repo dir (default: current directory)
-  --base <ref>          target branch or commit to judge against (overrides
-                        HARNESS_KIT_BASE and CI variables)
-  --remote <name>       remote to fetch the base from and deepen a shallow
-                        checkout with (default: "origin")
-  --no-fetch            use local history only: never fetch or deepen
-  --profile <checkset>  use a validation.checksets entry instead of per-module
-                        checks
-  --json                machine-readable single-report output (default: false)
-  -h, --help            display help for command
+  -C, --repo <dir>            target repo dir (default: current directory)
+  --base <ref>                target branch or commit to judge against
+                              (overrides HARNESS_KIT_BASE and CI variables)
+  --remote <name>             remote to fetch the base from and deepen a shallow
+                              checkout with (default: "origin")
+  --no-fetch                  use local history only: never fetch or deepen
+  --profile <checkset>        use a validation.checksets entry instead of
+                              per-module checks
+  --isolate-check-git-config  start the repo's checks without the host's system
+                              and global/XDG git config (ci's own fetch keeps
+                              it; needs git >= 2.32) (default: false)
+  --json                      machine-readable single-report output (default:
+                              false)
+  -h, --help                  display help for command
 
 ## plan-checks
 Usage: harness-kit plan-checks [options]

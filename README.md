@@ -40,7 +40,7 @@ npx -y @erzhe/harness-kit@latest upgrade --repo .
 
 `--json` 始终只输出一份 `ai-harness/upgrade-report/v1`，包含 `status`、from/to version、pending/applied migrations、changed/dirty files、errors 和 post-upgrade verification。状态文件同样是确定性协议：`ai-harness/upgrade-state/v1` 只保存 package、version、manifest spec 与已应用 migration IDs；它应随代码提交，没有时间戳，也没有“使用哪些 Agent”的名单。
 
-运行要求：Node.js 18 或更高版本。发布前会用打包后的 CLI 在真实 Node 18 上做 `help / doctor / verify` smoke。
+运行要求：Node.js 18 或更高版本；git 2.24 或更高版本（`merge-base` / `fetch` 要用 `--end-of-options`）。`install-hooks --git` 要 git 2.26，`ci --isolate-check-git-config` 要 git 2.32。用到这些的地方先查版本，太旧时写明需要的和实际的版本（`ci` 以 exit 2 退出，deliver 的 task base 祖先检查改成一条警告），不会把 git 的报错误读成别的结论。发布前会用打包后的 CLI 在真实 Node 18 上做 `help / doctor / verify` smoke。
 
 ### 发版（维护者）
 
@@ -135,9 +135,17 @@ Claude Code 可能把新装的项目 Hook 加载进正在运行的会话，也�
 - **历史自己补**：先 fetch 目标分支；浅克隆逐步加深 base 与 HEAD 两侧，仍算不出 merge-base 就报错退出，不静默通过。`--no-fetch` 只用本地历史。
 - **一次跑完**：在同一个 merge-base 上跑 run-checks 和 verify。merge-base 上已经过期的知识按 deliver 的规则算目标分支的维护项。
 - **不碰本地状态**：不读也不写 deliver 戳、task 记录和 waiver，本地记的豁免在 CI 里不生效。
-- **退出码**：0 通过，1 检查或 verify 失败，2 配置 / 环境错误（没有 base、浅克隆补不齐、命令行写错等，改动没被判定）。`--json` 给出 base 来源、merge-base、选中的检查和各自结果、verify 结果。
+- **git 版本先查**：启动时先看 git 版本，低于 2.24 就报 `git-unsupported`（exit 2），写明需要和实际的版本。git 命令本身出错（不是“没有这个 ref”或“没有共同历史”）报 `git-failed`，带上 git 的 stderr。
+- **检查进程的 git 配置**：默认情况下，ci 启动的检查继承宿主的 git 配置。有的构建机在系统级或用户级（含 XDG）git 配置里放了 `url.<base>.insteadOf` 改写规则：ci 自己 fetch 要靠它们连上远端，仓库里的检查（例如读 remote URL 的测试）却不该看到它们。加 `--isolate-check-git-config` 后：
+  - 受影响的：ci 启动的检查，即 run-checks 的检查、verify 的 `check` 和 `snapshot` 命令，以及它们再启动的进程。这些进程不读宿主的 system 和 global / XDG git 配置（设了 `GIT_CONFIG_NOSYSTEM=1` 和 `GIT_CONFIG_GLOBAL=/dev/null`）。
+  - 不受影响的：ci 自己的 fetch、加深、merge-base，以及 Harness 内部收集 diff 的 git 调用，都照常用宿主配置。仓库自己的 git 配置，以及通过环境变量传入的配置（`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>`），检查里照常生效。
+  - 宿主配置里的其他设置，例如 `safe.directory`、`user.name` / `user.email`、凭据，检查也看不到了；需要的话用上面的环境变量传给检查。
+  - 需要 git 2.32；更旧的 git 没有只作用于 git 的开关，做法见 [`examples/ci/`](examples/ci/README.md#host-git-config-and-the-checks)。
+- **声明 CI 配置**：把运行 `harness-kit ci` 的流水线文件写进 manifest 的 `validation.ci_configs`（具体路径，例如 `.github/workflows/harness.yml`、`.gitlab-ci.yml`，其他平台的流水线文件同理）。这些文件和 `.agents/**` 一样算 Harness 路径，改它们不再报 `unmapped-file`；verify 检查它们都存在，且至少一个仍在调用 `harness-kit … ci`，门禁被误删时 verify 失败。
+- **diff_check 要带 base**：`git diff --check` 不带 base 时只比较工作区和 index，在 CI 的干净检出上什么都不查就通过。doctor 会给出提示，ci 选中它时也会在输出和 JSON `warnings` 里提示，改法是 `git diff --check ${HARNESS_KIT_BASE:-HEAD}`（run-checks 和 ci 会把被评判的 base 放进 `HARNESS_KIT_BASE`）。`upgrade` 会把恰好是 `git diff --check` 的 run 改成这个写法，手改过的写法不动，只在 notes 里说明。
+- **退出码**：0 通过，1 检查或 verify 失败，2 配置 / 环境错误（没有 base、浅克隆补不齐、git 太旧或出错、命令行写错等，改动没被判定）。`--json` 给出 git 版本、base 来源、merge-base、选中的检查和各自结果、verify 结果。
 
-GitHub Actions 和 GitLab CI 的最小配置见 [`examples/ci/`](examples/ci/)：完整历史 checkout、Node.js 18+、先装好检查需要的依赖，再用 lock 里的版本调用 `npx -y "@erzhe/harness-kit@<lock 版本>" ci`。
+GitHub Actions 和 GitLab CI 的最小配置见 [`examples/ci/`](examples/ci/)：完整历史 checkout、Node.js 18+ 和 git 2.24+、先装好检查需要的依赖，再用 lock 里的版本调用 `npx -y "@erzhe/harness-kit@<lock 版本>" ci`；接入后把这个文件写进 `validation.ci_configs`。
 
 其它：
 
@@ -156,7 +164,7 @@ GitHub Actions 和 GitLab CI 的最小配置见 [`examples/ci/`](examples/ci/)�
 | `harness-kit upgrade [--check] [--json]` | 把仓库原地升级到当前运行 CLI 版本；确定性迁移 + 生成物刷新 + doctor/verify，不访问 registry/CI/代码托管；已安装的项目级 Hook 在同一事务里原位刷新，不新装不卸载 |
 | `harness-kit task-start` | 记录本 worktree 任务 base（可选；SessionStart 也会写） |
 | `harness-kit deliver` | **任务验收入口**：scope → run-checks + verify → stamp |
-| `harness-kit ci [--base <ref>] [--no-fetch] [--json]` | **CI 合码门禁**：从参数或 CI 环境变量确定 base，补齐历史，在 merge-base 上跑 run-checks + verify；不读写本地戳；exit 0 通过 / 1 失败 / 2 配置或环境错误 |
+| `harness-kit ci [--base <ref>] [--no-fetch] [--isolate-check-git-config] [--json]` | **CI 合码门禁**：从参数或 CI 环境变量确定 base，补齐历史，在 merge-base 上跑 run-checks + verify；不读写本地戳；exit 0 通过 / 1 失败 / 2 配置或环境错误 |
 | `harness-kit prepare-adoption` | 在仓外生成私有 blind-audit bundle；包含旧入口、嵌套 AGENTS/CLAUDE、其他客户端规则文件及它们显式引用的文档证据，规则迁移后的落点（`.agents/` 下的 knowledge / checks / lock / 复核记录等和 `root: repo` 文档），`.agents/` 外的其他接入改动（如 `.prettierignore`），确定性候选，以及把每个路径映射到包内文件的 `INDEX.md`；不改仓内文件。找不到仓内文件的纯路径提及列进绑定 hash 的 `unresolved` 清单，交给盲审确认；契约基线未 accept、复核未记录等“盲审后再做会让回执失效”的步骤会提前警告 |
 | `harness-kit record-adoption-audit` | 把声明的 pass/fail、理由和审计报告 hash 绑定到一版候选 |
 | `harness-kit sync --adopt-existing --candidate ... --audit ...` | 首次接管：只有 live legacy、候选、manifest 和 pass receipt 逐字节一致才事务写入；没有旧入口的仓库也必须核对回执 |

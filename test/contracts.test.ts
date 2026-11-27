@@ -22,6 +22,11 @@ test("runCapture reports failure (non-zero exit) instead of throwing", () => {
   assert.equal(cap.stdout, "");
 });
 
+test("runCapture runs the command with the environment it is given", () => {
+  const cap = runCapture(tmp(), 'printf "%s" "$HK_CAPTURE_PROBE"', undefined, { ...process.env, HK_CAPTURE_PROBE: "isolated" });
+  assert.equal(cap.stdout, "isolated");
+});
+
 test("runCapture times out a hung repository command", () => {
   const cap = runCapture(tmp(), `node -e "setTimeout(() => {}, 5000)"`, 50);
   assert.equal(cap.ok, false);

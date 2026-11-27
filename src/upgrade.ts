@@ -1,7 +1,8 @@
 import { chmodSync } from "node:fs";
 import { join } from "node:path";
-import { type Document, parseDocument } from "yaml";
+import { type Document, isMap, isScalar, parseDocument } from "yaml";
 import { assertManagedFileAdoption } from "./adoption";
+import { BASELESS_DIFF_CHECK_RUN, diffCheckWithoutBase, DIFF_CHECK_RUN } from "./diff-check";
 import { collectChanges } from "./git";
 import { harnessInvocation, HARNESS_LOCK_REL } from "./harness-cli";
 import { MANIFEST_REL, type Manifest, validateManifest } from "./manifest";
@@ -81,7 +82,51 @@ export interface UpgradeOptions {
 
 export interface UpgradeMigration {
   id: string;
-  migrate(document: Document.Parsed): void;
+  /**
+   * Rewrite the manifest source; return it unchanged when the rule does not
+   * apply. Edit only the bytes the rule owns, so the rest of the hand-authored
+   * file keeps its formatting and comments. Notes go into the report.
+   */
+  migrate(source: string): { source: string; notes: string[] };
+}
+
+/** The run scalars of every capability, with their position in the source. */
+function capabilityRuns(source: string): Array<{ id: string; value: string; type: string | undefined; range: [number, number] }> {
+  const capabilities = parseDocument(source).get("capabilities", true);
+  if (!isMap(capabilities)) return [];
+  return capabilities.items.flatMap((pair) => {
+    const run = isMap(pair.value) ? pair.value.get("run", true) : null;
+    const id = isScalar(pair.key) ? String(pair.key.value) : "";
+    if (!isScalar(run) || typeof run.value !== "string" || !run.range) return [];
+    return [{ id, value: run.value, type: run.type, range: [run.range[0], run.range[1]] as [number, number] }];
+  });
+}
+
+/**
+ * `git diff --check` with no base compares the worktree with the index, so it
+ * never checks committed task changes and passes on a clean CI checkout
+ * without checking anything. Only a run equal to exactly that command is
+ * rewritten (keeping its quote style); any other base-less form was written
+ * by hand and is left to its owner, with a note.
+ */
+function migrateDiffCheckBase(source: string): { source: string; notes: string[] } {
+  const notes: string[] = [];
+  let next = source;
+  // Right to left, so earlier ranges stay valid.
+  for (const run of capabilityRuns(source).reverse()) {
+    if (run.value === BASELESS_DIFF_CHECK_RUN) {
+      const quoted = run.type === "QUOTE_SINGLE" ? `'${DIFF_CHECK_RUN}'` : JSON.stringify(DIFF_CHECK_RUN);
+      next = next.slice(0, run.range[0]) + quoted + next.slice(run.range[1]);
+      notes.unshift(
+        `capabilities.${run.id}.run: "${BASELESS_DIFF_CHECK_RUN}" -> "${DIFF_CHECK_RUN}"; without a base it only saw uncommitted changes, so ci passed it without checking anything`,
+      );
+    } else if (diffCheckWithoutBase(run.value)) {
+      notes.unshift(
+        `capabilities.${run.id}.run runs git diff --check without a base but is not the old starter command, so upgrade left it unchanged; give it a base such as \${HARNESS_KIT_BASE:-HEAD}`,
+      );
+    }
+  }
+  return { source: next, notes };
 }
 
 // Ordered, append-only migration registry. Optional product features do not
@@ -90,10 +135,15 @@ export interface UpgradeMigration {
 export const UPGRADE_MIGRATIONS: readonly UpgradeMigration[] = [
   {
     id: "upgrade-state-v1",
-    migrate: () => {
-      // Bootstrap-only migration. The first durable state records that the
-      // repository participates in deterministic future migrations.
-    },
+    // Bootstrap-only migration. The first durable state records that the
+    // repository participates in deterministic future migrations.
+    migrate: (source) => ({ source, notes: [] }),
+  },
+  {
+    // A starter check that silently checks nothing is a defect every managed
+    // repository carrying it must lose, not an optional feature.
+    id: "diff-check-task-base-v1",
+    migrate: migrateDiffCheckBase,
   },
 ];
 
@@ -285,20 +335,22 @@ function internalUpgrade(repo: string, options: UpgradeOptions): UpgradeReport {
       return fail(report, `refusing downgrade from ${state.version} to ${options.targetVersion}`);
   }
 
-  const document = parseDocument(manifestInspection.currentContent);
-  const sourceManifest = asManifest(document, report);
+  const sourceManifest = asManifest(parseDocument(manifestInspection.currentContent), report);
   if ("status" in sourceManifest) return sourceManifest;
   report.manifestSpec = sourceManifest.spec;
-  const normalizedSource = document.toString();
 
   const applied = new Set(state?.appliedMigrations ?? []);
   const pending = UPGRADE_MIGRATIONS.filter((migration) => !applied.has(migration.id));
   report.pendingMigrations = pending.map((migration) => migration.id);
-  for (const migration of pending) migration.migrate(document);
+  let finalManifestContent = manifestInspection.currentContent;
+  for (const migration of pending) {
+    const migrated = migration.migrate(finalManifestContent);
+    finalManifestContent = migrated.source;
+    report.notes.push(...migrated.notes);
+  }
 
-  const finalManifest = asManifest(document, report);
+  const finalManifest = asManifest(parseDocument(finalManifestContent), report);
   if ("status" in finalManifest) return finalManifest;
-  const migratedManifestContent = document.toString();
   const nextState: UpgradeState = {
     schema: UPGRADE_STATE_SCHEMA,
     package: options.packageName,
@@ -306,10 +358,6 @@ function internalUpgrade(repo: string, options: UpgradeOptions): UpgradeReport {
     manifestSpec: finalManifest.spec,
     appliedMigrations: UPGRADE_MIGRATIONS.map((migration) => migration.id),
   };
-  // Parsing alone must not reformat a repository-owned manifest. Serialize it
-  // only when a migration actually changed the document model.
-  const manifestChanged = migratedManifestContent !== normalizedSource;
-  const finalManifestContent = manifestChanged ? migratedManifestContent : manifestInspection.currentContent;
   // Generated entries pin the lock version, so render them for the version
   // this same transaction writes into the lock.
   // Upgrade refreshes existing entries but never creates the first AGENTS.md:

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTaskRecord } from "../delivery";
 import { repoHarnessInvocation } from "../harness-cli";
-import { collectChanges, EMPTY_TREE_BASE, GitDiffError, type ChangeSet } from "../git";
+import { collectChanges, EMPTY_TREE_BASE, GitDiffError, withoutHostGitConfig, type ChangeSet } from "../git";
 import { loadManifest, validateManifest, type Manifest } from "../manifest";
 import { validationPlanFingerprint, type Gap, type Plan } from "../planner";
 import {
@@ -44,6 +44,8 @@ export interface RunChecksOpts {
    * (the CI gate, whose result lives in the CI job, never in local state).
    */
   record?: boolean;
+  /** Start checks without the host's system and global git config (ci --isolate-check-git-config). */
+  isolateGitConfig?: boolean;
 }
 
 interface Failure {
@@ -95,8 +97,8 @@ function isWaivableGap(gap: Gap): boolean {
  * HARNESS_KIT_CHANGED_FILES names a file listing changed paths one per line,
  * relative to the target root, deleted paths included.
  */
-export function checkEnvironment(changes: ChangeSet | null, changedFilesPath: string | null): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+export function checkEnvironment(changes: ChangeSet | null, changedFilesPath: string | null, isolateGitConfig = false): NodeJS.ProcessEnv {
+  const env = isolateGitConfig ? withoutHostGitConfig(process.env) : { ...process.env };
   // Never leak an outer run's values into a nested harness-kit invocation.
   delete env.HARNESS_KIT_BASE;
   delete env.HARNESS_KIT_CHANGED_FILES;
@@ -381,7 +383,7 @@ export function runChecksCmd(repo: string, opts: RunChecksOpts): number {
     : Date.now() + (opts.budgetMs !== undefined && opts.budgetMs > 0 ? opts.budgetMs : CHECK_BUDGET_MS);
 
   const changedFilesList = !errors.length && plan.checks.length ? writeChangedFilesList(changes.files) : null;
-  const env = checkEnvironment(changes, changedFilesList?.path ?? null);
+  const env = checkEnvironment(changes, changedFilesList?.path ?? null, opts.isolateGitConfig);
   try {
     if (!errors.length) {
       for (const check of plan.checks) {

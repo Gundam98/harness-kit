@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 import picomatch from "picomatch";
 import YAML from "yaml";
 import { isSafeContractId } from "./contracts";
@@ -112,6 +112,9 @@ export interface Validation {
     test_touch_default?: TestTouchPolicy;
   };
   required_coverage?: string[]; // changed files matching these globs must belong to owns/tests
+  // CI configuration files that run `harness-kit ci` (exact target-relative paths, no globs).
+  // Their changes are Harness paths, not unmapped files; verify checks the gate is still there.
+  ci_configs?: string[];
 }
 
 export interface Manifest {
@@ -562,6 +565,15 @@ export function validateManifest(m: Manifest): ValidationIssue[] {
     checkPositiveGlobs(v.required_coverage, "validation.required_coverage");
     checkGlobSafety(v.required_coverage, "validation.required_coverage");
     checkRelativePaths(v.required_coverage, "validation.required_coverage");
+    checkStrArr(v.ci_configs, "validation.ci_configs");
+    checkRelativePaths(v.ci_configs, "validation.ci_configs");
+    for (const [index, path] of (Array.isArray(v.ci_configs) ? v.ci_configs : []).entries()) {
+      if (typeof path !== "string" || !path) continue;
+      if (picomatch.scan(path).isGlob)
+        issues.push({ level: "error", msg: `validation.ci_configs[${index}] 必须是具体文件路径，不支持 glob: ${path}` });
+      else if (path.endsWith("/") || path !== posix.normalize(path))
+        issues.push({ level: "error", msg: `validation.ci_configs[${index}] 必须是规范的相对文件路径（如 .github/workflows/harness.yml）: ${path}` });
+    }
     if (v.policies !== undefined && !isRecord(v.policies))
       issues.push({ level: "error", msg: "validation.policies 必须是对象" });
     const defaultTouch = isRecord(v.policies) ? v.policies.test_touch_default : undefined;

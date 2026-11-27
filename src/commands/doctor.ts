@@ -2,6 +2,7 @@ import fg from "fast-glob";
 import picomatch from "picomatch";
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { capabilitiesWithoutDiffBase, diffCheckWithoutBaseMessage } from "../diff-check";
 import { buildHarnessGuidance, contextFreshnessActions } from "../guidance";
 import { lockedHarnessVersion, repoHarnessInvocation } from "../harness-cli";
 import { inspectAgentHookStatus } from "../hook-status";
@@ -31,11 +32,12 @@ const ADOPTION_LOG_HEADING = /^##\s+Log\s*$/;
 /**
  * Hand-written Harness commands that upgrade cannot rewrite: a pin to another
  * version than the lock, or the bare command of the 0.7.x adoption template.
- * Scans the manifest, hand-written .agents documents, and root=repo knowledge
- * documents; history is skipped: journal ADRs and the adoption Log onwards.
+ * Scans the manifest, the declared CI configs, hand-written .agents documents,
+ * and root=repo knowledge documents; history is skipped: journal ADRs and the
+ * adoption Log onwards.
  */
 function staleHandWrittenInvocations(repo: string, m: Manifest, locked: string | null): string[] {
-  const files = new Set<string>([".agents/manifest.yaml"]);
+  const files = new Set<string>([".agents/manifest.yaml", ...(m.validation?.ci_configs ?? [])]);
   // Journal ADRs are history and may name the versions they were written for.
   for (const path of fg.sync([".agents/**/*.md"], { cwd: repo, dot: true, onlyFiles: true, ignore: [".agents/adoption/**", "**/journal/**"] }))
     files.add(path);
@@ -95,6 +97,8 @@ export function doctorCmd(repo: string, opts: DoctorOpts = {}): number {
     if (n === 0 && !inv.enforcement.allow_empty)
       warn(`invariant ${inv.id}: enforcement path_glob matches 0 files — passes without checking anything (wrong path_glob for this repo layout?)`);
   }
+  // The same kind of vacuous pass for a check: a base-less `git diff --check`.
+  for (const id of capabilitiesWithoutDiffBase(m)) warn(diffCheckWithoutBaseMessage(id));
   // Map rot, per glob: one dead owns glob is a path whose changes can never
   // select its module; a dead tests glob can never satisfy test_touch. Matching
   // uses the planner's own picomatch semantics over one repository listing.
@@ -186,6 +190,7 @@ export function doctorCmd(repo: string, opts: DoctorOpts = {}): number {
     for (const b of new Set(k.binds ?? [])) checkRepoPath(b, `knowledge "${k.path}" binds`, true);
   }
   if (m.playbooks?.dir) checkPath(m.playbooks.dir, "playbooks");
+  for (const p of m.validation?.ci_configs ?? []) checkRepoPath(p, "validation.ci_configs", true);
   // routing read/entry are navigation pointers (NOT freshness-bound) — dirs OK.
   for (const r of m.routing ?? [])
     for (const p of new Set([...(r.read ?? []), ...(r.entry ?? [])])) checkRepoPointer(p, `routing "${r.when}"`);

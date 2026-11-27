@@ -28,7 +28,9 @@ export type CiErrorKind =
   | "shallow-history"
   | "no-merge-base"
   | "not-a-repo"
-  | "no-head";
+  | "no-head"
+  /** git itself failed (not "no such ref" / "no common history"); the message carries its stderr. */
+  | "git-failed";
 
 /** A configuration or environment problem: the change was never judged. */
 export class CiConfigError extends Error {
@@ -136,17 +138,29 @@ export function detectCiBase(option: string | undefined, environment: NodeJS.Pro
   return null;
 }
 
+/** A command line that runs the CI gate: `harness-kit ci`, `npx -y "@erzhe/harness-kit@${version}" ci`, `node dist/harness-kit.cjs ci`. */
+export const HARNESS_CI_CALL = /harness-kit\S*\s+ci(?![\w.-])/;
+
 export const NO_BASE_MESSAGE =
   "no base to judge this change against: pass --base <ref> or set HARNESS_KIT_BASE. " +
   "Detected automatically: GitLab merge request pipelines (CI_MERGE_REQUEST_DIFF_BASE_SHA / CI_MERGE_REQUEST_TARGET_BRANCH_NAME), " +
   "GitHub pull_request (GITHUB_BASE_REF), and the pushed range of a GitHub push / merge_group event or a GitLab push pipeline " +
   "(none exists for a newly created branch). ci never guesses a base such as HEAD~1.";
 
+/** git's own diagnosis: its error / fatal lines when it printed any (not a usage dump), else the last lines. */
 function errorText(error: unknown): string {
   const e = error as { stderr?: Buffer | string; message?: string };
   const stderr = Buffer.isBuffer(e.stderr) ? e.stderr.toString("utf8") : e.stderr;
-  return String(stderr || e.message || error).trim().split("\n").slice(-3).join(" ");
+  const lines = String(stderr || e.message || error)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const diagnosed = lines.filter((line) => /^(fatal|error):/.test(line));
+  return (diagnosed.length ? diagnosed : lines).slice(-3).join(" ");
 }
+
+/** A git command that failed for a reason other than answering "no". */
+class GitCommandError extends Error {}
 
 function git(root: string, args: string[], timeout?: number): string {
   return execFileSync("git", args, {
@@ -167,16 +181,32 @@ function tryGit(root: string, args: string[]): string | null {
   }
 }
 
+/**
+ * A git query whose "no" is exit 1 with nothing on stderr (rev-parse --verify
+ * --quiet: no such commit; merge-base: no common ancestor). Any other failure
+ * is git itself failing (a rejected flag, a broken repository) and throws, so
+ * it never reads as "no".
+ */
+function query(root: string, args: string[]): string | null {
+  try {
+    return git(root, args).trim();
+  } catch (error) {
+    const { status, stderr } = error as { status?: number | null; stderr?: string };
+    if (status === 1 && !stderr?.trim()) return null;
+    throw new GitCommandError(`git ${args.join(" ")} failed${typeof status === "number" ? ` (exit ${status})` : ""}: ${errorText(error)}`);
+  }
+}
+
 function commitOf(root: string, ref: string): string | null {
-  return tryGit(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
+  return query(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`]);
 }
 
 function isShallow(root: string): boolean {
-  return tryGit(root, ["rev-parse", "--is-shallow-repository"]) === "true";
+  return query(root, ["rev-parse", "--is-shallow-repository"]) === "true";
 }
 
 function mergeBase(root: string, commit: string, head: string): string | null {
-  return tryGit(root, ["merge-base", "--end-of-options", commit, head]);
+  return query(root, ["merge-base", "--end-of-options", commit, head]);
 }
 
 interface BaseTarget {
@@ -204,7 +234,8 @@ function baseTarget(value: string, remote: string): BaseTarget {
  * Make the base and HEAD share history locally, then resolve their merge-base.
  * Fetches the base (a branch always, a commit only when missing), deepens a
  * shallow checkout step by step and finally unshallows it. Never passes
- * silently: without a merge-base this throws CiConfigError.
+ * silently: without a merge-base this throws CiConfigError, and a git command
+ * that fails (rather than answering "no") throws it as git-failed with git's stderr.
  */
 export function prepareCiBase(
   repo: string,
@@ -222,8 +253,31 @@ export function prepareCiBase(
     throw new CiConfigError("invalid-base", `invalid base from ${request.source}: ${JSON.stringify(value)} (expected a branch, ref, or commit)`);
   if (!SAFE_REF.test(opts.remote)) throw new CiConfigError("invalid-base", `invalid --remote: ${JSON.stringify(opts.remote)}`);
 
+  const progress: CiProgress = { history: null, resolved: {} };
+  try {
+    return resolveCiBase(root, request, opts, progress);
+  } catch (error) {
+    if (!(error instanceof GitCommandError)) throw error;
+    throw new CiConfigError("git-failed", error.message, progress.history, progress.resolved);
+  }
+}
+
+/** What prepareCiBase had established when git failed, for the report. */
+interface CiProgress {
+  history: CiHistory | null;
+  resolved: Partial<Pick<CiBase, "ref" | "commit" | "head">>;
+}
+
+function resolveCiBase(
+  root: string,
+  request: CiBaseRequest,
+  opts: { fetch: boolean; remote: string },
+  progress: CiProgress,
+): { base: CiBase; history: CiHistory } {
+  const { value } = request;
   const head = commitOf(root, "HEAD");
   if (!head) throw new CiConfigError("no-head", "HEAD has no commit; check out the change before running ci");
+  progress.resolved.head = head;
   const shallow = isShallow(root);
   const history: CiHistory = {
     remote: opts.remote,
@@ -234,6 +288,7 @@ export function prepareCiBase(
     commands: [],
     warnings: [],
   };
+  progress.history = history;
   const target = baseTarget(value, opts.remote);
   const remoteExists = opts.fetch && tryGit(root, ["remote", "get-url", "--", opts.remote]) !== null;
   let lastFetchError = "";
@@ -278,6 +333,7 @@ export function prepareCiBase(
           : "it is not in the local history";
     throw new CiConfigError("unresolved-base", `cannot resolve base ${value} (from ${request.source}): ${why}`, history, { head });
   }
+  progress.resolved = { ref: resolvedRef, commit, head };
   if (!target.commit && history.fetch !== "fetched" && resolvedRef === value)
     history.warnings.push(`judging against the local ${value}, which may be behind ${opts.remote}`);
 

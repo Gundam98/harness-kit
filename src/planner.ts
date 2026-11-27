@@ -84,7 +84,9 @@ export interface PlannedChange {
  * baselines, knowledge, check scripts), the generated entries, and the client
  * hook configs install-hooks writes. `verify`, which deliver always runs,
  * already judges them, so they never count as unmapped or required-unmapped.
- * A module may still own them to add its own checks.
+ * The CI configs a manifest declares in `validation.ci_configs` join them
+ * (verify checks they still run `harness-kit ci`). A module may still own
+ * them to add its own checks.
  */
 export const HARNESS_COVERED_GLOBS = [
   ".agents/**",
@@ -190,7 +192,9 @@ export function planChecks(m: Manifest, input: Array<string | PlannedChange>, op
     }
   }
   const affectedGates = compiledGates.filter((item) => affectedGateSet.has(item.id));
-  const unmapped = changed.filter((f) => !matchedFiles.has(f) && !harnessCovered(f));
+  const ciConfigs = new Set(m.validation?.ci_configs ?? []);
+  const isHarnessPath = (file: string) => harnessCovered(file) || ciConfigs.has(file);
+  const unmapped = changed.filter((f) => !matchedFiles.has(f) && !isHarnessPath(f));
   const requiredCoverage = m.validation?.required_coverage?.length
     ? picomatch(m.validation.required_coverage, { dot: true })
     : null;
@@ -337,7 +341,7 @@ export function planChecks(m: Manifest, input: Array<string | PlannedChange>, op
 
   // verify (which deliver always runs) judges Harness paths, so a change made
   // only of them is not "no checks".
-  const onlyHarnessPaths = changed.length > 0 && changed.every((file) => harnessCovered(file));
+  const onlyHarnessPaths = changed.length > 0 && changed.every(isHarnessPath);
   if (changed.length > 0 && checks.length === 0 && !onlyHarnessPaths && !gaps.some((gap) => gap.kind === "unknown-profile")) {
     gaps.push({
       kind: "no-checks-selected",

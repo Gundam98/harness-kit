@@ -12,6 +12,7 @@ import { syncCmd } from "../src/commands/sync";
 import { verifyCmd } from "../src/commands/verify";
 import { loadManifest } from "../src/manifest";
 import { recordContextReview } from "../src/state";
+import { withFakeGit } from "./fake-git";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
@@ -464,4 +465,9 @@ test("deliver shows where its task record came from and warns when it may belong
   assert.match(json.taskWarnings[0], /task record is 10 day\(s\) old/);
   assert.match(json.taskWarnings[1], /is not an ancestor of HEAD/);
   assert.match(json.taskWarnings[1], /task-start --repo \. first/);
+
+  // A git too old for the ancestry check says so instead of dropping the warning.
+  ({ json } = withFakeGit({ FAKE_GIT_VERSION: "2.20.1" }, () => captureJson(() => deliverCmd(repo, { json: true }))));
+  assert.equal(json.taskWarnings.length, 2, JSON.stringify(json.taskWarnings));
+  assert.match(json.taskWarnings[1], /^the task-base ancestry check needs git >= 2\.24 \(for --end-of-options\); found 2\.20\.1\./);
 });

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import pkg from "../../package.json";
+import { GIT_REQUIRES, gitVersionProblem } from "../git";
 import { err, info, ok, warn, writeText } from "../util";
 import { ALL_AGENTS, AgentTool, installStopHooks } from "./stop-hooks";
 
@@ -73,6 +74,8 @@ function inspectGitHookScope(repo: string): { scope?: GitHookScope; failure?: st
     .map((line) => line.slice("worktree ".length));
   if (!worktrees.length) return { failure: "git worktree list returned no worktrees" };
 
+  const tooOld = gitVersionProblem(GIT_REQUIRES.configScope, "install-hooks --git");
+  if (tooOld) return { failure: tooOld.message };
   const configured = git(repo, ["config", "--show-origin", "--show-scope", "--get-all", "core.hooksPath"]);
   if (configured.status !== 0 && !(configured.status === 1 && !configured.stdout.trim())) {
     return { failure: `git config could not inspect core.hooksPath and its origin: ${gitFailure(configured)}` };

@@ -232,6 +232,9 @@ test("onboard and check-loop place the CI gate after the local loop", () => {
   assert.match(onboard, /接入时不改 CI，也不要指示用户修改 CI/);
   assert.match(onboard, /`npx -y "@erzhe\/harness-kit@<版本>" ci`，版本从 `\.agents\/harness\.lock\.json` 读/);
   assert.match(onboard, /退出码 0 通过 \/ 1 改动没通过 \/ 2 配置或环境错误/);
+  // The job's image needs a git ci can use; host URL rewrites stay away from the checks only when asked.
+  assert.match(onboard, /Node\.js 18\+ 和 git 2\.24\+（ci 启动时检查）/);
+  assert.match(onboard, /有检查不该看到的 URL 改写（`url\.<base>\.insteadOf`）时，加 `--isolate-check-git-config`（git 2\.32\+）/);
   assert.match(onboard, /只限 manifest 里当作 check 用到的 capability；setup、启动器、发布脚本不算/);
   const loop = captureStdout(checkLoopCmd).out;
   assert.match(loop, /合码前的门禁是 MR \/ PR 上的 `harness-kit ci`/);

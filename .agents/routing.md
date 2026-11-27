@@ -41,6 +41,7 @@ Find the change-type that matches your task and follow that row before editing.
 - Do NOT assume: 迁移状态必须确定、可提交且不记录时间戳或 Agent 名单
 - Do NOT assume: upgrade 的仓内文件共用一次事务，已装的项目级 Hook 也在其中原位刷新；新装 / 卸载 Hook 和 linked-worktree Codex 分发器（Git admin、用户目录）仍留给 install-hooks
 - Do NOT assume: 可选产品能力不能伪装成所有仓库必跑的结构迁移
+- Do NOT assume: 迁移按文本改写 manifest，只替换自己负责的 YAML 节点（按 range），不能整份重新序列化；只改与旧值逐字相同的内容，手写变体留给 notes
 - Minimum verification: `test`, `typecheck`
 
 ## 改 CI 门禁入口（ci）/ CI 示例

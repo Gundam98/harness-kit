@@ -13,6 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { withFakeGit } from "./fake-git";
 import {
   commitCodexLinkedInstall,
   isLinkedGitWorktree,
@@ -77,6 +78,11 @@ test("detects a standard linked worktree without Orca-specific state", () => {
   const fixture = linkedFixture();
   assert.equal(isLinkedGitWorktree(fixture.main), false);
   assert.equal(isLinkedGitWorktree(fixture.linked), true);
+  // git before 2.31 echoes --path-format=absolute instead of applying it; detection must not depend on it.
+  withFakeGit({ FAKE_GIT_ECHO_PATH_FORMAT: "1" }, () => {
+    assert.equal(isLinkedGitWorktree(fixture.main), false);
+    assert.equal(isLinkedGitWorktree(fixture.linked), true);
+  });
 });
 
 test("does not mistake a Git submodule for a linked worktree", () => {
