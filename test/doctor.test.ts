@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { doctorCmd } from "../src/commands/doctor";
 import { syncCmd } from "../src/commands/sync";
 import { loadManifest } from "../src/manifest";
+import { capabilitiesWithoutDiffBase, diffCheckWithoutBase, DIFF_CHECK_RUN } from "../src/diff-check";
 import { recordContextReview } from "../src/state";
 
 function write(repo: string, rel: string, content: string): void {
@@ -406,4 +407,70 @@ test("doctor points at hand-written Harness commands that upgrade cannot rewrite
   assert.doesNotMatch(result.output, /conventions\.md/);
   assert.doesNotMatch(result.output, /journal\/0001\.md/, "journal ADRs are history");
   assert.doesNotMatch(result.output, /adoption\.md:(6|9) /, "the adoption Log and the records after it are history");
+});
+
+test("a git diff --check without a base is recognized however it is spelled, and only then", () => {
+  for (const run of [
+    "git diff --check",
+    "git diff --check HEAD",
+    "git diff --cached --check",
+    "git --no-pager diff --check",
+    "git -C packages/app diff --check -- src",
+    "pnpm lint && git diff --check",
+    "'git' diff --check",
+  ])
+    assert.equal(diffCheckWithoutBase(run), true, run);
+  for (const run of [
+    DIFF_CHECK_RUN,
+    'git diff --check "$HARNESS_KIT_BASE"',
+    "git diff --check origin/main...HEAD",
+    "git diff --check $(git merge-base origin/main HEAD)",
+    "git diff --no-index --check a.txt b.txt",
+    "git diff --stat",
+    "git log --check",
+    "pnpm lint",
+  ])
+    assert.equal(diffCheckWithoutBase(run), false, run);
+  assert.deepEqual(
+    capabilitiesWithoutDiffBase(loadManifestFrom({ ws: { run: "git diff --check" }, ok: { run: DIFF_CHECK_RUN }, test: { run: "pnpm test" } })),
+    ["ws"],
+  );
+});
+
+function loadManifestFrom(capabilities: Record<string, { run: string }>) {
+  return { spec: "ai-harness/v0", identity: { name: "x" }, capabilities } as Parameters<typeof capabilitiesWithoutDiffBase>[0];
+}
+
+test("doctor says a base-less diff check passes in CI without checking anything, and how to fix it", () => {
+  const repo = mkdtempSync(join(tmpdir(), "hk-doctor-diff-check-"));
+  const manifest = (run: string) =>
+    `spec: ai-harness/v0\nidentity: { name: ws, summary: whitespace }\ncapabilities:\n  diff_check: { run: ${JSON.stringify(run)} }\nvalidation:\n  defaults:\n    no_match: [diff_check]\n`;
+  write(repo, ".agents/manifest.yaml", manifest("git diff --check"));
+  syncCmd(repo, { createEntry: true });
+  const old = capture(() => doctorCmd(repo));
+  assert.equal(old.code, 0, "advisory, like any other vacuous pass");
+  assert.match(
+    old.output,
+    /WARN capability diff_check runs `git diff --check` without a base: it only sees uncommitted changes, so deliver never checks committed task changes and ci \(a clean checkout\) passes it without checking anything\. Make its run `git diff --check \$\{HARNESS_KIT_BASE:-HEAD\}`/,
+  );
+  write(repo, ".agents/manifest.yaml", manifest(DIFF_CHECK_RUN));
+  syncCmd(repo, {});
+  assert.doesNotMatch(capture(() => doctorCmd(repo)).output, /without a base/);
+});
+
+test("doctor checks that declared CI configs exist and pin the lock's version", () => {
+  const repo = mkdtempSync(join(tmpdir(), "hk-doctor-ci-configs-"));
+  write(repo, ".agents/harness.lock.json", JSON.stringify({ schema: "ai-harness/upgrade-state/v1", package: "@erzhe/harness-kit", version: "0.9.1", manifestSpec: "ai-harness/v0", appliedMigrations: ["upgrade-state-v1"] }) + "\n");
+  write(
+    repo,
+    ".agents/manifest.yaml",
+    "spec: ai-harness/v0\nidentity: { name: ci, summary: ci configs }\nvalidation:\n  ci_configs: [.github/workflows/harness.yml, .gitlab-ci.yml]\n",
+  );
+  write(repo, ".github/workflows/harness.yml", "jobs:\n  harness:\n    steps:\n      - run: npx -y @erzhe/harness-kit@0.8.2 ci\n");
+  syncCmd(repo, { createEntry: true });
+  const result = capture(() => doctorCmd(repo));
+  assert.equal(result.code, 1);
+  assert.match(result.output, /OK {3}validation\.ci_configs: \.github\/workflows\/harness\.yml/);
+  assert.match(result.output, /ERR {2}validation\.ci_configs points at a missing path: \.gitlab-ci\.yml/);
+  assert.match(result.output, /WARN \.github\/workflows\/harness\.yml:4 pins @erzhe\/harness-kit@0\.8\.2; the lock pins 0\.9\.1/);
 });

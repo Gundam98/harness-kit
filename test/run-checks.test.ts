@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { planChecksCmd } from "../src/commands/plan-checks";
-import { runChecksCmd, type RunChecksOpts } from "../src/commands/run-checks";
+import { checkEnvironment, runChecksCmd, type RunChecksOpts } from "../src/commands/run-checks";
 import { readLatestValidationSession } from "../src/validation-state";
 
 // A fresh git repo. We rely on untracked files counting as "changed" (git
@@ -496,4 +496,27 @@ test("checks receive the resolved task base and the changed-file list they are j
     "src/api/users.ts",
     "test/api/users.test.ts",
   ]);
+});
+
+test("checkEnvironment can drop the host's git config and still replaces outer change values", () => {
+  const saved = Object.fromEntries(["HARNESS_KIT_BASE", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { HARNESS_KIT_BASE: "stale", GIT_CONFIG_SYSTEM: "/etc/host-gitconfig", GIT_CONFIG_GLOBAL: "/opt/ci-host/gitconfig" });
+  delete process.env.GIT_CONFIG_NOSYSTEM;
+  try {
+    const isolated = checkEnvironment(null, "/tmp/changed.txt", true);
+    assert.deepEqual(
+      [isolated.GIT_CONFIG_NOSYSTEM, isolated.GIT_CONFIG_GLOBAL, isolated.GIT_CONFIG_SYSTEM, isolated.HARNESS_KIT_BASE, isolated.HARNESS_KIT_CHANGED_FILES],
+      ["1", "/dev/null", undefined, undefined, "/tmp/changed.txt"],
+    );
+    const inherited = checkEnvironment(null, null);
+    assert.deepEqual(
+      [inherited.GIT_CONFIG_NOSYSTEM, inherited.GIT_CONFIG_GLOBAL, inherited.GIT_CONFIG_SYSTEM, inherited.HARNESS_KIT_BASE],
+      [undefined, "/opt/ci-host/gitconfig", "/etc/host-gitconfig", undefined],
+    );
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 });

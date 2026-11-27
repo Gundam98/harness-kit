@@ -54,14 +54,14 @@ harness-kit init --repo .
 按顺序逐块填 `.agents/manifest.yaml`（schema 见 harness-kit 的 `SPEC-v0.md`）：
 
 1. **identity**：读 README、包/构建配置和顶层目录。填 `name`、一句话 `summary`、`scope_in` / `scope_out`、`upstream` / `downstream`。`scope_out` 会渲染成 “Out of scope (do NOT modify here)”，只放本仓**不得修改**的东西；“相关知识在业务知识库”“配置在运营后台”这类指路事实写进 knowledge、invariants 或 `downstream`，否则会被 Agent 读成禁令。
-2. **capabilities**：从真实 scripts、Makefile、justfile 和自动化配置提取 setup / build / test / dev / lint / release。实际运行或检查入口；长驻的标 `background: true`，有副作用的标 `mutating: true`。旧规则只约束增量代码时（例如“对改动文件执行 gofmt”），check 用 `run-checks` 注入的 `HARNESS_KIT_BASE`（任务 base commit）和 `HARNESS_KIT_CHANGED_FILES`（改动清单文件，每行一个路径，含已删除路径）按任务 diff 实现，不必给存量文件建 hash 基线。
+2. **capabilities**：从真实 scripts、Makefile、justfile 和自动化配置提取 setup / build / test / dev / lint / release。实际运行或检查入口；长驻的标 `background: true`，有副作用的标 `mutating: true`。旧规则只约束增量代码时（例如“对改动文件执行 gofmt”），check 用 `run-checks` 注入的 `HARNESS_KIT_BASE`（任务 base commit）和 `HARNESS_KIT_CHANGED_FILES`（改动清单文件，每行一个路径，含已删除路径）按任务 diff 实现，不必给存量文件建 hash 基线。空白检查同理要带 base：`git diff --check ${HARNESS_KIT_BASE:-HEAD}`；不带 base 的 `git diff --check` 只比较工作区和 index，看不到已提交的任务改动，在合码门禁的干净检出上什么都不查就通过（doctor 会报）。
 3. **environment**：从 `.env.example`、配置和 README 抓关键环境变量。危险的标 `secret: true`、必需的标 `required: true`。
 4. **contracts**：识别 HTTP、CLI、公共 API、proto/schema/IDL、事件等对外接口，尽量给打印当前接口指纹的 `snapshot` 命令。过滤注释/生成物噪音；含复杂引号、正则或管道时下沉到 `.agents/checks/<id>.sh`，脚本从仓库根运行并固定 `LC_ALL=C`。无法自动检查才写 `manual_verify`。`breaking_needs` 只在仓库真的给接口发版本号时填写；没有版本号就省略，漂移时按契约说明处理后 `accept-contract`。契约 snapshot、check 脚本和 binds 的**文字说明必须与实际覆盖面一致**：脚本头逐项写出截取哪些文件或语句、怎样归一化；派审前先跑一组漂移负例（改一处接口必须 fail）和噪音负例（只改注释或格式必须不漂移）；journal 和 knowledge 里不写“全部来源都已绑定”这类穷举说法。
 5. **invariants**：从 policy、现有 agent 入口和真实代码约定提炼“必须始终成立”的规则。AGENTS.md 会渲染每条规则的 `id`，scope、routing 和模块卡可以直接写“见不变量 `<id>`”。能表达成 `enforcement` / `check` 就执行化，否则标 `manual: true`。`forbid_pattern` 是不带 flag 的 JS 正则，逐行匹配；`path_glob` 用 fast-glob 且 `dot: false`，通配符不进点目录，`node_modules` / `dist` 等始终排除（见 SPEC §3）。规则文字写的扫描范围不能比这更大。
 6. **modules + validation**：按真实模块边界填写 `role`、具体 `entry` 文件、上下游、`must_know`、`pitfalls`，并完成可执行影响面（旧入口有“不写目录 / 不列清单”类原则时，`role` 只写一句边界说明，不复述目录；可选的 upstream/downstream 模块依赖图默认不写，见 §4 的冲突处理）：
    - 首次接入必须给真实生产面填写 `modules[].owns`、真实覆盖文件填写 `modules[].tests`、真实可运行 capability 填写 `modules[].checks`，再用 `validation.required_coverage` 覆盖真实生产根。
    - 每个 `owns` / `tests` / `required_coverage` 正向 glob 写入前都要对仓库文件清单实际求值并确认命中；不得套用惯例路径、发明 glob 或使用 `!` 否定 glob。真实不存在的测试/检查要报 GAP，不能造一个来过门禁。
-   - Harness 自己的路径（`.agents/**`，含 `.agents/checks/` 下的检查脚本和程序、`AGENTS.md`、`CLAUDE.md`、install-hooks 写的 `.claude/settings.json` / `.cursor/hooks.json` / `.codex/*`）由 `verify` 判定，不会算 unmapped，也不会被 `required_coverage: ["**/*.go"]` 这类 glob 拦住；只改这些路径时，没配 `no_match` 也不会报 no-checks-selected。这只是**免检，不挑选检查**：只为覆盖而建的模块可以删，挂了 `go vet`、`gofmt` 之类 checks 的模块要保留，否则这些检查会静默消失。capability 的 `run` 直接引用的脚本或目录（例如 `bash .agents/checks/go-test.sh`、`go vet ./.agents/checks/snapshot`）改动时，会自动选中该 capability（只限 manifest 里当作 check 用到的 capability；setup、启动器、发布脚本不算）。这类模块不要把 `.agents/manifest.yaml` 写进 `entry`，否则每次改 manifest 都要重新复核。
+   - Harness 自己的路径（`.agents/**`，含 `.agents/checks/` 下的检查脚本和程序、`AGENTS.md`、`CLAUDE.md`、install-hooks 写的 `.claude/settings.json` / `.cursor/hooks.json` / `.codex/*`，以及 `validation.ci_configs` 声明的流水线文件）由 `verify` 判定，不会算 unmapped，也不会被 `required_coverage: ["**/*.go"]` 这类 glob 拦住；只改这些路径时，没配 `no_match` 也不会报 no-checks-selected。这只是**免检，不挑选检查**：只为覆盖而建的模块可以删，挂了 `go vet`、`gofmt` 之类 checks 的模块要保留，否则这些检查会静默消失。capability 的 `run` 直接引用的脚本或目录（例如 `bash .agents/checks/go-test.sh`、`go vet ./.agents/checks/snapshot`）改动时，会自动选中该 capability（只限 manifest 里当作 check 用到的 capability；setup、启动器、发布脚本不算）。这类模块不要把 `.agents/manifest.yaml` 写进 `entry`，否则每次改 manifest 都要重新复核。
    - `checks` 只能引用已声明、可终止、无副作用且亲自验证可运行的 capability 动词。用 `plan-checks` / `run-checks` 验证真实改动能选中预期模块、测试与检查。
    - `test_touch` 按实际风险设为 `required | advisory | off`；公共接口、核心业务、安全边界优先 `required`，不能全仓拍脑袋一刀切。
    - 做一次**用户可观察行为的验证面审计**：从真实 scripts、测试配置与测试文件识别浏览器用户流、桌面进程边界、main/preload/renderer/IPC、CLI/API smoke 等项目实际存在的 acceptance/E2E 检查。领域名称由项目定义，Harness 核心不内置 taxonomy。
@@ -161,8 +161,10 @@ Codex 首次信任用户分发器时，agent 先用一句人话说明：“它�
 
 **接入时不改 CI，也不要指示用户修改 CI**：CI 配置属于团队。`harness-kit ci` 是 MR / PR 上的合码门禁，会话 Hook 和 deliver 只是本地快速反馈；它自己从 CI 环境变量找 base，退出码 0 通过 / 1 改动没通过 / 2 配置或环境错误。只有用户明确要求接入 CI 时，才加一个 job，内容如下：
 - 完整历史 checkout（GitHub `fetch-depth: 0`，GitLab `GIT_DEPTH: "0"`）；
-- Node.js 18+，并装好检查需要的依赖；
-- 运行 `npx -y "@erzhe/harness-kit@<版本>" ci`，版本从 `.agents/harness.lock.json` 读。
+- Node.js 18+ 和 git 2.24+（ci 启动时检查），并装好检查需要的依赖；
+- 运行 `npx -y "@erzhe/harness-kit@<版本>" ci`，版本从 `.agents/harness.lock.json` 读；
+- 构建机的系统级或用户级 git 配置里有检查不该看到的 URL 改写（`url.<base>.insteadOf`）时，加 `--isolate-check-git-config`（git 2.32+）；
+- 把这个流水线文件写进 manifest 的 `validation.ci_configs`（具体路径，不用 glob），改它就不算未归属文件，verify 会检查它仍在调用 `harness-kit … ci`。
 
 ## 7. 日常维护 / 自愈
 

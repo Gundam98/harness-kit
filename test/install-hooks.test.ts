@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { installHooksCmd } from "../src/commands/install-hooks";
+import { withFakeGit } from "./fake-git";
 import { installHooksCommand, installStopHooks } from "../src/commands/stop-hooks";
 import { collectChanges, EMPTY_TREE_BASE } from "../src/git";
 import { agentHookConfigurationFingerprint, inspectAgentHookStatus } from "../src/hook-status";
@@ -123,6 +124,14 @@ test("install-hooks writes managed, executable pre-commit + pre-push in a single
     assert.match(body, /@erzhe\/harness-kit@\d+\.\d+\.\d+/);
     assert.ok((statSync(p).mode & 0o100) !== 0, `${name} is owner-executable`);
   }
+});
+
+test("install-hooks --git names the git it needs instead of failing on a rejected flag", () => {
+  const dir = freshRepo();
+  const result = withFakeGit({ FAKE_GIT_VERSION: "2.25.1" }, () => captureOutput(() => installHooksCmd(dir, { git: true })));
+  assert.equal(result.code, 1);
+  assert.match(result.output, /install-hooks --git needs git >= 2\.26 \(for git config --show-scope\); found 2\.25\.1/);
+  assert.equal(existsSync(join(dir, ".git", "hooks", "pre-commit")), false);
 });
 
 test("install-hooks refuses a linked worktree and leaves the common hooks directory untouched", () => {

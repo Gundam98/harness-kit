@@ -75,11 +75,12 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 2 * 60 * 1000;
  * Run a repo-provided command and capture stdout. The CLI stays protocol-agnostic:
  * it never parses the output, it only compares it against a stored baseline.
  */
-export function runCapture(repo: string, cmd: string, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS): Capture {
+export function runCapture(repo: string, cmd: string, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS, env?: NodeJS.ProcessEnv): Capture {
   if (timeoutMs <= 0) return { ok: false, stdout: "", error: "verification command budget exhausted", timedOut: true };
   try {
     const stdout = execSync(cmd, {
       cwd: repo,
+      env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: Math.max(1, timeoutMs),

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { collectChanges, isAncestorCommit } from "../git";
+import { collectChanges, GitDiffError, isAncestorCommit } from "../git";
 import {
   inspectDeliveryStamp,
   locateHarnessTargets,
@@ -442,8 +442,10 @@ function taskRecordWarnings(repo: string, scope: ChangeScope, cli: string): stri
   try {
     if (!isAncestorCommit(repo, task.baseSha, "HEAD"))
       warnings.push(`task base ${task.baseSha} is not an ancestor of HEAD, so the scope includes unrelated history; ${restart}`);
-  } catch {
-    // Ancestry is advisory; scope resolution already validated the base.
+  } catch (error) {
+    // Ancestry is advisory; scope resolution already validated the base. A git
+    // too old to run the check is reported instead of skipped silently.
+    if (error instanceof GitDiffError && error.kind === "git-unsupported") warnings.push(error.message);
   }
   return warnings;
 }

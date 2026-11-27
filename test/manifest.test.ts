@@ -29,7 +29,7 @@ test("the repository impact map keeps Codex linked hooks with their focused test
 test("the repository impact map keeps shared guidance with its focused tests", () => {
   const module = loadManifest(REPO).modules?.find((item) => item.name === "core-gates");
   assert.ok(module);
-  assert.ok(module.owns?.includes("src/{contracts,util,guidance}.ts"));
+  assert.ok(module.owns?.includes("src/{contracts,util,guidance,diff-check}.ts"));
   assert.ok(module.tests?.includes("test/guidance.test.ts"));
 });
 
@@ -137,6 +137,19 @@ test("the repository impact map routes CI gate work to its own module", () => {
   assert.ok(manifest.modules?.find((item) => item.name === "examples")?.role.includes("examples/ci"));
   // ci runs run-checks, so a capability that is not a check must never be picked by a changed script.
   assert.ok(manifest.modules?.find((item) => item.name === "planner")?.pitfalls?.some((pitfall) => /没当作 check 用到的 capability/.test(pitfall)));
+});
+
+test("the impact map and SPEC record the git versions each feature needs", () => {
+  const manifest = loadManifest(REPO);
+  const pitfalls = (name: string) => manifest.modules?.find((item) => item.name === name)?.pitfalls ?? [];
+  assert.ok(pitfalls("ci-gate").some((pitfall) => /git 版本（>= 2\.24）/.test(pitfall) && /git-failed/.test(pitfall)));
+  assert.ok(pitfalls("ci-gate").some((pitfall) => /--isolate-check-git-config/.test(pitfall) && /ci 自己的 fetch/.test(pitfall)));
+  assert.ok(pitfalls("git-diff").some((pitfall) => /GIT_REQUIRES/.test(pitfall)));
+  assert.ok(pitfalls("agent-hooks").some((pitfall) => /不用 --path-format/.test(pitfall)));
+  const spec = readFileSync(join(REPO, "SPEC-v0.md"), "utf8");
+  assert.match(spec, /低于 2\.24（`merge-base` \/ `fetch` 的 `--end-of-options`）报 `git-unsupported`/);
+  assert.match(spec, /`--isolate-check-git-config` 只作用于 ci 为仓库启动的命令/);
+  assert.match(spec, /需要 git 2\.32（`GIT_CONFIG_GLOBAL`）/);
 });
 
 test("SPEC states the exact declarative enforcement scan semantics", () => {
@@ -385,6 +398,35 @@ test("test-touch policy and required coverage shapes are validated", () => {
     .map((issue) => issue.msg);
   assert.ok(errors.some((message) => /test_touch/.test(message)));
   assert.ok(errors.some((message) => /required_coverage/.test(message)));
+});
+
+test("the impact map and SPEC record the CI adoption rules", () => {
+  const manifest = loadManifest(REPO);
+  const module = (name: string) => manifest.modules?.find((item) => item.name === name);
+  assert.ok(module("core-gates")?.owns?.includes("src/{contracts,util,guidance,diff-check}.ts"));
+  assert.ok(module("core-gates")?.pitfalls?.some((pitfall) => /validation\.ci_configs/.test(pitfall) && /verify 必须检查/.test(pitfall)));
+  assert.ok(module("planner")?.pitfalls?.some((pitfall) => /validation\.ci_configs（具体路径，不是 glob）同样算 Harness 路径/.test(pitfall)));
+  assert.ok(module("ci-gate")?.pitfalls?.some((pitfall) => /写进 warnings/.test(pitfall)));
+  const upgradeRoute = manifest.routing?.find((item) => item.when.startsWith("改 Harness 版本升级规则"));
+  assert.ok(upgradeRoute?.dont_assume?.some((rule) => /按文本改写 manifest/.test(rule)));
+  const spec = readFileSync(join(REPO, "SPEC-v0.md"), "utf8");
+  assert.match(spec, /ci_configs\?: \[string\] +# 运行 `harness-kit ci` 的 CI 配置文件/);
+  assert.match(spec, /`diff-check-task-base-v1`（0\.9\.1）：capability 的 `run` \*\*恰好\*\*是 `git diff --check` 时/);
+});
+
+test("validation.ci_configs takes exact relative file paths only", () => {
+  const errorsFor = (ci_configs: unknown) =>
+    validateManifest({ spec: "ai-harness/v0", identity: { name: "x" }, validation: { ci_configs } } as unknown as Manifest)
+      .filter((issue) => issue.level === "error")
+      .map((issue) => issue.msg);
+  assert.deepEqual(errorsFor([".github/workflows/harness.yml", ".gitlab-ci.yml", "ci/Jenkinsfile"]), []);
+  assert.ok(errorsFor(".gitlab-ci.yml").some((message) => /validation\.ci_configs 必须是数组/.test(message)));
+  assert.ok(errorsFor([3]).some((message) => /validation\.ci_configs\[0\] 必须是字符串/.test(message)));
+  assert.ok(errorsFor([".github/workflows/*.yml"]).some((message) => /不支持 glob/.test(message)));
+  assert.ok(errorsFor(["../shared/ci.yml"]).some((message) => /不能越界/.test(message)));
+  assert.ok(errorsFor(["/etc/ci.yml"]).some((message) => /不能越界/.test(message)));
+  for (const path of ["./.gitlab-ci.yml", "ci//build.yml", "ci/"])
+    assert.ok(errorsFor([path]).some((message) => /必须是规范的相对文件路径/.test(message)), path);
 });
 
 test("numeric routing.verify and module.checks report schema errors instead of throwing", () => {

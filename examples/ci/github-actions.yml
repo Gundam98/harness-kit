@@ -36,7 +36,10 @@ jobs:
 
       - name: harness-kit ci
         # Pin the CLI to the version in .agents/harness.lock.json, like every
-        # other Harness command in this repository.
+        # other Harness command in this repository. ci needs git 2.24 or later.
+        # If the runner's system or user git config rewrites URLs that the
+        # checks must not see, append --isolate-check-git-config
+        # (git 2.32 or later; see README.md).
         run: |
           version="$(node -p "require('./.agents/harness.lock.json').version")"
           npx -y "@erzhe/harness-kit@${version}" ci

@@ -7,7 +7,7 @@
 # failed), or 2 (configuration / environment error, e.g. no base or unusable
 # history).
 harness:
-  # harness-kit needs Node.js 18 or later.
+  # harness-kit needs Node.js 18 or later and git 2.24 or later.
   image: node:22
   variables:
     # Full history, so the merge-base is local. With a shallow clone, ci fetches
@@ -23,6 +23,8 @@ harness:
     # install whatever they need first. Replace with your setup.
     - npm ci
     # Pin the CLI to the version in .agents/harness.lock.json, like every other
-    # Harness command in this repository.
+    # Harness command in this repository. If the runner's system or user git
+    # config rewrites URLs that the checks must not see, append
+    # --isolate-check-git-config (git 2.32 or later; see README.md).
     - version="$(node -p "require('./.agents/harness.lock.json').version")"
     - npx -y "@erzhe/harness-kit@${version}" ci

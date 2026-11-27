@@ -1,8 +1,10 @@
 import { execSync } from "node:child_process";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { HARNESS_CI_CALL } from "../ci";
 import { DEFAULT_COMMAND_TIMEOUT_MS, readBaseline, runCapture } from "../contracts";
 import { inheritedContextIssueKeys, resolveChangeScope } from "../delivery";
-import { collectChanges, type ChangeSet } from "../git";
+import { collectChanges, withoutHostGitConfig, type ChangeSet } from "../git";
 import { runEnforcement } from "../enforce";
 import {
   buildHarnessGuidance,
@@ -33,6 +35,8 @@ export interface VerifyOpts {
    * maintenance instead of failures. Plain `verify` stays strict.
    */
   contextBase?: string;
+  /** Start check and snapshot commands without the host's system and global git config (ci --isolate-check-git-config). */
+  isolateGitConfig?: boolean;
 }
 
 interface CheckResult {
@@ -221,6 +225,33 @@ function verifyInternal(repo: string, opts: VerifyOpts): number {
     failures++;
   }
 
+  // Declared CI configs count as Harness paths (never unmapped), so verify is
+  // what keeps the declaration honest: the files exist and still run the gate.
+  const ciConfigs = manifest.validation?.ci_configs ?? [];
+  if (ciConfigs.length) {
+    emit("info", "\n1b) CI merge gate configs");
+    let runsGate = false;
+    for (const rel of ciConfigs) {
+      let text: string;
+      try {
+        if (!statSync(join(repo, rel)).isFile()) throw new Error("not a regular file");
+        text = readFileSync(join(repo, rel), "utf8");
+      } catch (error) {
+        failures++;
+        const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? "is missing" : `cannot be read (${(error as Error).message})`;
+        emit("error", `validation.ci_configs: ${rel} ${reason}`);
+        continue;
+      }
+      const runs = HARNESS_CI_CALL.test(text);
+      runsGate ||= runs;
+      emit("ok", runs ? `${rel} runs harness-kit ci` : rel);
+    }
+    if (!runsGate) {
+      failures++;
+      emit("error", "none of validation.ci_configs runs `harness-kit ... ci`: the merge gate was removed, or declare the file that calls it");
+    }
+  }
+
   emit("info", "\n2) Context freshness");
   try {
     const issues = inspectContextFreshness(repo, manifest);
@@ -271,7 +302,8 @@ function verifyInternal(repo: string, opts: VerifyOpts): number {
     }
   }
   const changedFilesList = checkChanges ? writeChangedFilesList(checkChanges.files) : null;
-  const checkEnv = checkEnvironment(checkChanges, changedFilesList?.path ?? null);
+  const checkEnv = checkEnvironment(checkChanges, changedFilesList?.path ?? null, opts.isolateGitConfig);
+  const snapshotEnv = opts.isolateGitConfig ? withoutHostGitConfig(process.env) : undefined;
   try {
     emit("info", "\n3) Invariants");
     for (const invariant of manifest.invariants ?? []) {
@@ -327,7 +359,7 @@ function verifyInternal(repo: string, opts: VerifyOpts): number {
             }
           }
           if (contract.snapshot) {
-            const captured = runCapture(repo, contract.snapshot, remainingMs());
+            const captured = runCapture(repo, contract.snapshot, remainingMs(), snapshotEnv);
             if (!captured.ok) {
               failures++;
               emit(

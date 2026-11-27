@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 
-export type GitDiffErrorKind = "not-a-repo" | "invalid-base" | "diff-failed";
+export type GitDiffErrorKind = "not-a-repo" | "invalid-base" | "diff-failed" | "git-unsupported";
 
 export class GitDiffError extends Error {
   constructor(
@@ -36,6 +36,63 @@ export interface CollectChangesOptions {
 }
 
 export const EMPTY_TREE_BASE = "(empty-tree)";
+
+export interface GitRequirement {
+  version: readonly [number, number];
+  feature: string;
+}
+
+/**
+ * The oldest git each feature runs on. Older releases reject these flags
+ * (merge-base, fetch: "unknown option") or ignore the variable, and the
+ * failure would read as a wrong answer, so callers check first.
+ */
+export const GIT_REQUIRES = {
+  /** merge-base / fetch `--end-of-options`: ci, deliver's task-base ancestry check. */
+  core: { version: [2, 24], feature: "--end-of-options" },
+  /** install-hooks --git reads where core.hooksPath is set. */
+  configScope: { version: [2, 26], feature: "git config --show-scope" },
+  /** ci --isolate-check-git-config replaces the global and XDG files. */
+  configGlobal: { version: [2, 32], feature: "GIT_CONFIG_GLOBAL" },
+} as const satisfies Record<string, GitRequirement>;
+
+export interface GitVersionProblem {
+  /** unavailable: git did not run; unsupported: it is older than required. */
+  kind: "git-unavailable" | "git-unsupported";
+  message: string;
+}
+
+/** "git version 2.39.3 (Apple Git-146)", "git version 2.45.1.windows.1" → [major, minor]; null when unrecognized. */
+export function parseGitVersion(text: string): [number, number] | null {
+  const match = /^git version (\d+)\.(\d+)/.exec(text.trim());
+  return match ? [Number(match[1]), Number(match[2])] : null;
+}
+
+/** `git --version` of the git on PATH (what every git call here runs), or why it did not run. */
+export function gitVersionText(): { text: string | null; error: string | null } {
+  try {
+    const text = execFileSync("git", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    return { text, error: null };
+  } catch (error) {
+    return { text: null, error: errorText(error) };
+  }
+}
+
+/**
+ * Why the git on PATH cannot serve `who`, or null when it can. A version
+ * string it cannot parse (a vendor build) is accepted rather than refused on a guess.
+ */
+export function gitVersionProblem(requirement: GitRequirement, who: string, probe = gitVersionText()): GitVersionProblem | null {
+  const { text, error } = probe;
+  if (text === null) return { kind: "git-unavailable", message: `${who} needs git, which did not run: ${error}` };
+  const found = parseGitVersion(text);
+  const [major, minor] = requirement.version;
+  if (!found || found[0] > major || (found[0] === major && found[1] >= minor)) return null;
+  return {
+    kind: "git-unsupported",
+    message: `${who} needs git >= ${major}.${minor} (for ${requirement.feature}); found ${text.replace(/^git version /, "")}. Install a newer git where this runs.`,
+  };
+}
 
 function errorText(error: unknown): string {
   const e = error as { stderr?: Buffer | string; message?: string };
@@ -256,6 +313,8 @@ export function collectChanges(repoInput: string, base = "HEAD", opts: CollectCh
 
 /** True when `ancestor` is reachable from `descendant`; false when it is not. Git failures throw. */
 export function isAncestorCommit(repo: string, ancestor: string, descendant: string): boolean {
+  const tooOld = gitVersionProblem(GIT_REQUIRES.core, "the task-base ancestry check");
+  if (tooOld) throw new GitDiffError("git-unsupported", tooOld.message);
   try {
     execFileSync("git", ["merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant], {
       cwd: repo,
@@ -266,6 +325,18 @@ export function isAncestorCommit(repo: string, ancestor: string, descendant: str
     if ((error as { status?: number }).status === 1) return false;
     throw new GitDiffError("diff-failed", `git merge-base failed: ${errorText(error)}`);
   }
+}
+
+/**
+ * The environment for a process that must not see the host's git config:
+ * no system file and no global one ($HOME/.gitconfig, $XDG_CONFIG_HOME/git/config).
+ * The repository's own config and settings passed in the environment
+ * (GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS) still apply. Needs GIT_REQUIRES.configGlobal.
+ */
+export function withoutHostGitConfig(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const isolated: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  delete isolated.GIT_CONFIG_SYSTEM;
+  return isolated;
 }
 
 /** Compatibility helper for callers that only need paths. */

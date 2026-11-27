@@ -1,13 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectCiBase } from "../src/ci";
 import { syncCmd } from "../src/commands/sync";
 import { gitAdminDir } from "../src/git";
+import { fakeGitPath } from "./fake-git";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
@@ -43,6 +44,29 @@ const CHECK = `import { readFileSync } from "node:fs";
 process.exit(readFileSync("src/core.ts", "utf8").includes("broken") ? 1 : 0);
 `;
 
+// A capability, an invariant check, and a contract snapshot that each see
+// whether git rewrites origin's URL (url.<base>.insteadOf from host config).
+const ORIGIN_URL_MANIFEST = MANIFEST.replace("checks: [test]", "checks: [test, origin-url]")
+  .replace(
+    'run: "node checks/test.mjs"',
+    'run: "node checks/test.mjs"\n  origin-url:\n    run: "node checks/origin-url.mjs --check"',
+  )
+  .concat(`  - id: origin-url-as-configured
+    rule: checks see origin's URL as the repository configures it
+    check: "node checks/origin-url.mjs --check"
+contracts:
+  - id: origin-url
+    kind: other
+    desc: what a check sees as origin's URL
+    snapshot: "node checks/origin-url.mjs"
+`);
+const ORIGIN_URL_CHECK = `import { execFileSync } from "node:child_process";
+const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
+const state = git("config", "--get", "remote.origin.url") === git("ls-remote", "--get-url", "origin") ? "as configured" : "rewritten";
+if (process.argv.includes("--check")) process.exit(state === "as configured" ? 0 : 1);
+process.stdout.write(state + "\\n");
+`;
+
 function write(repo: string, rel: string, content: string): void {
   const abs = join(repo, rel);
   mkdirSync(dirname(abs), { recursive: true });
@@ -60,11 +84,12 @@ function commit(repo: string, message: string): string {
 }
 
 /** origin: main with history, plus a feature branch three commits ahead of a main that moved on. */
-function origin(): { dir: string; forkPoint: string } {
+function origin(manifest = MANIFEST, files: Record<string, string> = {}): { dir: string; forkPoint: string } {
   const dir = mkdtempSync(join(tmpdir(), "hk-ci-origin-"));
   git(dir, ["init", "-q", "-b", "main"]);
-  write(dir, ".agents/manifest.yaml", MANIFEST);
+  write(dir, ".agents/manifest.yaml", manifest);
   write(dir, "checks/test.mjs", CHECK);
+  for (const [rel, content] of Object.entries(files)) write(dir, rel, content);
   write(dir, "src/core.ts", "export const value = 1;\n");
   write(dir, "test/core.test.ts", "// covers 1\n");
   syncCmd(dir, { createEntry: true });
@@ -97,14 +122,14 @@ function checkout(source: string, shallow: boolean): string {
 }
 
 /** The test runner's own CI variables must never leak into these runs. */
-function cleanEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+function cleanEnv(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env))
     if (!/^(GITHUB_|GITLAB_|CI_|HARNESS_KIT_BASE$)/.test(key)) env[key] = value;
   return { ...env, ...extra };
 }
 
-function ci(repo: string, args: string[] = [], extra: Record<string, string> = {}): { code: number; body: any; stdout: string } {
+function ci(repo: string, args: string[] = [], extra: Record<string, string | undefined> = {}): { code: number; body: any; stdout: string } {
   const result = spawnSync(TSX, [CLI, "ci", "--repo", repo, "--json", ...args], { cwd: repo, encoding: "utf8", env: cleanEnv(extra) });
   let body: any = null;
   try {
@@ -342,4 +367,132 @@ test("a failing check and a failing verify are check failures (exit 1)", () => {
   assert.ok(gap.body.blockingGaps.some((item: any) => item.kind === "missing-test-touch" && item.where === "core"));
   const gapText = spawnSync(TSX, [CLI, "ci", "--repo", repo, "--base", clean], { cwd: repo, encoding: "utf8", env: cleanEnv() });
   assert.match(gapText.stdout, /waivers recorded by a local run-checks do not apply in CI/);
+});
+
+test("a git too old for ci, or failing, is an environment error that says so", () => {
+  const { dir } = origin();
+  const repo = checkout(dir, false);
+  const PATH = fakeGitPath();
+
+  // An old git rejects merge-base / fetch --end-of-options; that must not read as "no history".
+  const old = ci(repo, ["--base", "main"], { PATH, FAKE_GIT_VERSION: "2.20.1" });
+  assert.equal(old.code, 2, old.stdout);
+  assert.deepEqual({ status: old.body.status, errorKind: old.body.errorKind }, { status: "error", errorKind: "git-unsupported" });
+  assert.match(old.body.errors[0], /^harness-kit ci needs git >= 2\.24 \(for --end-of-options\); found 2\.20\.1\./);
+  assert.equal(old.body.git.version, "2.20.1");
+  assert.equal(old.body.history, null, "nothing was fetched");
+  assert.equal(old.body.runChecks, null);
+  const text = spawnSync(TSX, [CLI, "ci", "--repo", repo, "--base", "main"], {
+    cwd: repo,
+    encoding: "utf8",
+    env: cleanEnv({ PATH, FAKE_GIT_VERSION: "2.20.1" }),
+  });
+  assert.equal(text.status, 2);
+  assert.match(text.stdout, /git: 2\.20\.1; checks inherit the host's git config/);
+  assert.match(text.stdout, /ERR {2}harness-kit ci needs git >= 2\.24/);
+
+  const isolation = ci(repo, ["--base", "main", "--isolate-check-git-config"], { PATH, FAKE_GIT_VERSION: "2.31.0" });
+  assert.equal(isolation.code, 2, isolation.stdout);
+  assert.equal(isolation.body.errorKind, "git-unsupported");
+  assert.match(isolation.body.errors[0], /--isolate-check-git-config needs git >= 2\.32 \(for GIT_CONFIG_GLOBAL\); found 2\.31\.0/);
+
+  // git failing is not "share no history": its stderr is in the report, with what had resolved.
+  const failing = ci(repo, ["--base", "main"], { PATH, FAKE_GIT_FAIL: "merge-base" });
+  assert.equal(failing.code, 2, failing.stdout);
+  assert.equal(failing.body.errorKind, "git-failed");
+  assert.match(failing.body.errors[0], /^git merge-base --end-of-options [0-9a-f]{40} [0-9a-f]{40} failed \(exit 128\): fatal: simulated merge-base failure$/);
+  assert.equal(failing.body.history.fetch, "fetched");
+  assert.equal(failing.body.base.ref, "refs/remotes/origin/main");
+  assert.match(failing.body.base.head, /^[0-9a-f]{40}$/);
+  assert.equal(failing.body.base.mergeBase, null);
+});
+
+test("--isolate-check-git-config keeps the host's git config from the checks, not from ci's fetch", () => {
+  const { dir } = origin(ORIGIN_URL_MANIFEST, {
+    "checks/origin-url.mjs": ORIGIN_URL_CHECK,
+    ".agents/contracts/origin-url.snapshot": "as configured\n",
+  });
+  // Shallow, and origin only reachable through the host's URL rewrite: ci has to fetch through it.
+  const repo = checkout(dir, true);
+  const url = "https://git.example.invalid/fixture.git";
+  git(repo, ["remote", "set-url", "origin", url]);
+  const host = mkdtempSync(join(tmpdir(), "hk-ci-host-"));
+  const rewrite = `[url "file://${dir}"]\n\tinsteadOf = ${url}\n`;
+  write(host, "system-gitconfig", rewrite);
+  write(host, "xdg/git/config", rewrite);
+  // The host config is simulated, so an isolated outer run (ci gating this repository) must not hide it.
+  const hostEnv = {
+    GIT_CONFIG_SYSTEM: join(host, "system-gitconfig"),
+    XDG_CONFIG_HOME: join(host, "xdg"),
+    GIT_CONFIG_NOSYSTEM: undefined,
+    GIT_CONFIG_GLOBAL: undefined,
+  };
+
+  const inherited = ci(repo, ["--base", "main"], hostEnv);
+  assert.equal(inherited.code, 1, inherited.stdout);
+  assert.equal(inherited.body.git.checkConfig, "host");
+  assert.equal(inherited.body.history.fetch, "fetched");
+  assert.deepEqual(inherited.body.checks.map((check: any) => [check.id, check.status]), [["test", "passed"], ["origin-url", "failed"]]);
+  const errors = inherited.body.verify.messages.filter((message: any) => message.level === "error").map((message: any) => message.text);
+  assert.ok(errors.some((text: string) => /^origin-url-as-configured: check failed/.test(text)), errors.join("\n"));
+  assert.ok(errors.some((text: string) => /^origin-url: contract drifted from baseline/.test(text)), errors.join("\n"));
+
+  const isolated = ci(repo, ["--base", "main", "--isolate-check-git-config"], hostEnv);
+  assert.equal(isolated.code, 0, isolated.stdout);
+  assert.equal(isolated.body.git.checkConfig, "isolated");
+  assert.equal(isolated.body.history.fetch, "fetched", "ci's own fetch still used the host's rewrite");
+  assert.deepEqual(isolated.body.checks.map((check: any) => [check.id, check.status]), [["test", "passed"], ["origin-url", "passed"]]);
+  assert.equal(isolated.body.verifyPassed, true);
+  const text = spawnSync(TSX, [CLI, "ci", "--repo", repo, "--base", "main", "--isolate-check-git-config"], {
+    cwd: repo,
+    encoding: "utf8",
+    env: cleanEnv(hostEnv),
+  });
+  assert.equal(text.status, 0, text.stdout);
+  assert.match(text.stdout, /checks run without the host's system \/ global \/ XDG git config/);
+});
+
+test("a base-less diff check passes in CI without checking anything, and ci says so", () => {
+  const manifest = MANIFEST.replace("checks: [test]", "checks: [test, diff_check]").replace(
+    'run: "node checks/test.mjs"',
+    'run: "node checks/test.mjs"\n  diff_check:\n    run: "git diff --check"',
+  );
+  const { dir } = origin(manifest);
+  const repo = checkout(dir, false);
+  // A committed whitespace error: what the check exists to catch.
+  write(repo, "src/core.ts", "export const value = 7;   \n");
+  write(repo, "test/core.test.ts", "// covers 7\n");
+  commit(repo, "trailing whitespace");
+
+  const vacuous = ci(repo, ["--base", "main"]);
+  assert.equal(vacuous.code, 0, vacuous.stdout);
+  assert.deepEqual(vacuous.body.checks.map((check: any) => [check.id, check.status]), [["test", "passed"], ["diff_check", "passed"]]);
+  assert.equal(vacuous.body.warnings.length, 1);
+  assert.match(vacuous.body.warnings[0], /^capability diff_check runs `git diff --check` without a base: .*ci \(a clean checkout\) passes it without checking anything/);
+  const text = spawnSync(TSX, [CLI, "ci", "--repo", repo, "--base", "main"], { cwd: repo, encoding: "utf8", env: cleanEnv() });
+  assert.match(text.stdout, /WARN capability diff_check runs `git diff --check` without a base/);
+
+  // With the judged base it sees the committed change and fails it.
+  write(repo, ".agents/manifest.yaml", readFileSync(join(repo, ".agents/manifest.yaml"), "utf8").replace('run: "git diff --check"', 'run: "git diff --check ${HARNESS_KIT_BASE:-HEAD}"'));
+  syncCmd(repo, {});
+  commit(repo, "diff_check sees the task base");
+  const real = ci(repo, ["--base", "main"]);
+  assert.equal(real.code, 1, real.stdout);
+  assert.deepEqual(real.body.checks.map((check: any) => [check.id, check.status]), [["test", "passed"], ["diff_check", "failed"]]);
+  assert.deepEqual(real.body.warnings, []);
+});
+
+test("a declared CI config is a Harness path in the gate it configures", () => {
+  const workflow = (step: string) => `jobs:\n  harness:\n    steps:\n      - run: ${step}\n`;
+  const { dir } = origin(`${MANIFEST}validation:\n  ci_configs: [.github/workflows/harness.yml]\n`, {
+    ".github/workflows/harness.yml": workflow('npx -y "@erzhe/harness-kit@${version}" ci'),
+  });
+  const repo = checkout(dir, false);
+  write(repo, ".github/workflows/harness.yml", workflow('npx -y "@erzhe/harness-kit@${version}" ci --isolate-check-git-config'));
+  commit(repo, "isolate the checks' git config");
+  const { code, body, stdout } = ci(repo, ["--base", "main"]);
+  assert.equal(code, 0, stdout);
+  assert.ok(body.changed.includes(".github/workflows/harness.yml"));
+  assert.ok(!body.runChecks.gaps.some((gap: any) => gap.kind === "unmapped-file"), JSON.stringify(body.runChecks.gaps));
+  assert.ok(body.verify.messages.some((message: any) => message.text === ".github/workflows/harness.yml runs harness-kit ci"));
 });

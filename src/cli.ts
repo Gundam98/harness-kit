@@ -180,12 +180,24 @@ program
   .option("--remote <name>", "remote to fetch the base from and deepen a shallow checkout with", "origin")
   .option("--no-fetch", "use local history only: never fetch or deepen")
   .option("--profile <checkset>", "use a validation.checksets entry instead of per-module checks")
+  .option(
+    "--isolate-check-git-config",
+    "start the repo's checks without the host's system and global/XDG git config (ci's own fetch keeps it; needs git >= 2.32)",
+    false,
+  )
   .option("--json", "machine-readable single-report output", false)
   // Exit 1 means "the change failed"; a malformed invocation is a configuration error.
   .exitOverride((error) => process.exit(error.exitCode === 0 ? 0 : CI_EXIT.error))
   .action((o) =>
     guard(() =>
-      ciCmd(repoOf(o), { base: o.base, fetch: o.fetch, remote: o.remote, profile: o.profile, json: o.json }),
+      ciCmd(repoOf(o), {
+        base: o.base,
+        fetch: o.fetch,
+        remote: o.remote,
+        profile: o.profile,
+        isolateCheckGitConfig: o.isolateCheckGitConfig,
+        json: o.json,
+      }),
     ),
   );
 

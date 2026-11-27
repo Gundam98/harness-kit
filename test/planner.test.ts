@@ -365,3 +365,19 @@ test("a change made only of Harness paths needs no no_match fallback", () => {
   const mixed = planChecks(m, [".agents/knowledge/domain.md", "README.md"]);
   assert.ok(mixed.gaps.some((gap) => gap.kind === "no-checks-selected"));
 });
+
+test("declared CI configs are Harness paths; other pipeline files stay unmapped", () => {
+  const m = withModules({
+    modules: [{ name: "svc", role: "r", entry: [], owns: ["cmd/**"], checks: ["test"] }],
+    validation: { ci_configs: [".github/workflows/harness.yml", ".gitlab-ci.yml"], required_coverage: ["**/*.yml"] },
+  });
+  const declared = planChecks(m, [".github/workflows/harness.yml", ".gitlab-ci.yml"]);
+  assert.ok(!declared.gaps.some((gap) => gap.kind === "unmapped-file" || gap.kind === "unmapped-required-file"), JSON.stringify(declared.gaps));
+  assert.ok(!declared.gaps.some((gap) => gap.kind === "no-checks-selected"), "verify judges them, as it does .agents/**");
+  // Exact paths, not a directory: another workflow in the same folder is not the gate.
+  const other = planChecks(m, [".github/workflows/release.yml"]);
+  assert.equal(other.gaps.find((gap) => gap.kind === "unmapped-required-file")?.where, ".github/workflows/release.yml");
+  // Without the declaration a pipeline file is unmapped like any other file.
+  const undeclared = planChecks(withModules({ modules: m.modules }), [".gitlab-ci.yml"]);
+  assert.equal(undeclared.gaps.find((gap) => gap.kind === "unmapped-file")?.where, ".gitlab-ci.yml");
+});

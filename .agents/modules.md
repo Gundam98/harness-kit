@@ -47,7 +47,7 @@
 - Checks: `test`, `typecheck`
 - Test touch: `required`
 - Pitfall: 保持纯函数：不碰 git / fs / 进程，只做 glob 匹配，方便单测
-- Pitfall: HARNESS_COVERED_GLOBS（.agents/**、生成入口、install-hooks 写的客户端配置）由 verify 判定，不算 unmapped / required-unmapped，全是这类路径的改动也不报 no-checks-selected；它们只免检、不挑选检查，模块仍可 owns 它们来加检查
+- Pitfall: HARNESS_COVERED_GLOBS（.agents/**、生成入口、install-hooks 写的客户端配置）由 verify 判定，不算 unmapped / required-unmapped，全是这类路径的改动也不报 no-checks-selected；它们只免检、不挑选检查，模块仍可 owns 它们来加检查；manifest 的 validation.ci_configs（具体路径，不是 glob）同样算 Harness 路径
 - Pitfall: 改动的文件被可自动执行的 capability 的 run 命令引用时（脚本或目录前缀）选中该 capability；mutating / background 不选，manifest 里没当作 check 用到的 capability（setup、开发态启动器、发布脚本）也不选
 
 ## git-diff — 安全收集 committed / staged / unstaged / untracked 改动并生成指纹
@@ -60,6 +60,7 @@
 - Pitfall: SessionStart 基线必须用 exact diff，不能用 merge-base 吞掉会话内 commit
 - Pitfall: nested --repo 必须只返回 target 内且 target-relative 的路径，不能混入兄弟 package
 - Pitfall: fingerprint 必须覆盖 Git 可执行位，以及 submodule 当前 commit/脏状态，不能只 hash 普通文件内容
+- Pitfall: 用到较新 git 特性前先查 gitVersionProblem(GIT_REQUIRES.*)：旧 git 对未知参数反应不一（merge-base / fetch 报 unknown option，rev-parse --verify 静默忽略，不带 --verify 的 rev-parse 原样输出），不能靠报错兜底
 
 ## validation-runner — plan-checks / run-checks / evidence 与持久化验收状态
 - Entry: `src/commands/run-checks.ts`
@@ -102,8 +103,11 @@
 - Pitfall: 退出码：0 通过、1 检查或 verify 失败、2 配置 / 环境错误（含命令行用法错误和意外异常）；环境问题不能读成“检查失败”，也不能静默通过
 - Pitfall: 浅克隆要同时加深 base 和 HEAD 两侧：浅 HEAD 没有父提交，base 在本地也算不出 merge-base；逐步 --deepen 后再 --unshallow，仍不行报 shallow-history
 - Pitfall: ci 不读也不写本地 deliver 状态：run-checks 传 record:false，verify 传 recordManualEvidence:false；本地 waiver 在 CI 里不生效
+- Pitfall: 选中的检查在 CI 的干净检出上看不到改动（不带 base 的 git diff --check）时写进 warnings：不改结论，但要说清它没查任何东西
 - Pitfall: 来自参数或环境变量的 base 只接受分支 / ref / commit 形状，拒绝以 - 开头、范围和 refspec；git 一律参数数组 + --end-of-options，fetch 设 GIT_TERMINAL_PROMPT=0
 - Pitfall: 单测要清掉宿主的 GITHUB_* / GITLAB_* / CI_* / HARNESS_KIT_BASE，否则在 CI 里跑测试会被宿主变量带偏
+- Pitfall: 启动时先查 git 版本（>= 2.24），太旧报 git-unsupported；rev-parse --verify --quiet / merge-base 只有 exit 1 且 stderr 为空才算“没有”，其他失败报 git-failed 并带 git 的 stderr，不能读成 no-merge-base
+- Pitfall: --isolate-check-git-config 只改 ci 启动的检查进程（run-checks 的检查、verify 的 check / snapshot）的环境：GIT_CONFIG_NOSYSTEM=1 + GIT_CONFIG_GLOBAL=/dev/null（git >= 2.32）；ci 自己的 fetch / merge-base 和收集 diff 的 git 调用仍用宿主配置
 
 ## agent-hooks — Claude Code / Cursor / Codex 的 SessionStart + Stop 生命周期门禁
 - Entry: `src/commands/hook-event.ts`
@@ -117,7 +121,8 @@
 - Pitfall: execute 模式若在 hook 内跑 verify，预算需小于客户端 hook 超时
 - Pitfall: Codex linked worktree 必须显式安装用户分发器 fallback；无登记 silent no-op，有登记但路径/权限/runner hash 不一致则 fail closed
 - Pitfall: linked worktree 只能有一条 Harness 生命周期路径；安装时移除自己的项目 Hook、保留第三方项目 Hook，状态发现双路径必须 DEGRADED
-- Pitfall: linked worktree 要比较 canonical git-dir 与 git-common-dir，不能把同样使用 .git 文件的 submodule 误判为 linked
+- Pitfall: linked worktree 要比较 canonical git-dir 与 git-common-dir，不能把同样使用 .git 文件的 submodule 误判为 linked；git-common-dir 按 worktree 根解析相对路径，不用 --path-format（git 2.31，旧 git 原样输出它，普通仓库会被判成 linked）
+- Pitfall: install-hooks --git 读 core.hooksPath 的 scope 要 git 2.26（--show-scope），先查版本再调用
 - Pitfall: Orca 的 CODEX_HOME 是生成态；用户分发器必须写入 ~/.codex 源配置并由新终端镜像，不能补丁运行时 hooks、Orca 管理脚本或 trust 状态
 - Pitfall: 原生 Git hooks 可能由 linked worktrees 共享；默认拒绝共享/custom/global/foreign hooks，不能用 --force 覆盖第三方 hook
 - Pitfall: Agent hook runner 与客户端配置必须整组预检、事务写入；拒绝配置软链接和未知 hooks 结构，不能写到项目外或留半套配置
@@ -180,13 +185,15 @@
 
 ## core-gates — init/sync/doctor/verify/contract/enforcement 的通用基础
 - Entry: `src/commands/verify.ts`
-- Owns (prod): `src/commands/{accept,doctor,verify}.ts`, `src/{contracts,util,guidance}.ts`
+- Owns (prod): `src/commands/{accept,doctor,verify}.ts`, `src/{contracts,util,guidance,diff-check}.ts`
 - Tests: `test/contracts.test.ts`, `test/state.test.ts`, `test/examples.test.ts`, `test/guidance.test.ts`, `test/doctor.test.ts`, `test/verify.test.ts`
 - Checks: `test`, `typecheck`
 - Pitfall: verify --json 对 repo-controlled matcher/文件系统异常也必须只输出一份结构化失败报告
 - Pitfall: accept-contract 必须先校验 manifest，基线只能写 .agents/contracts 的安全普通文件
 - Pitfall: doctor 的影响面 glob 检查用 planner 同款 picomatch（含点目录）逐个求值，owns 与 tests 的单个 glob 零命中都要报
 - Pitfall: verify 给 invariant / contract 的 check 注入任务 diff（snapshot 不注入）；verify / doctor 报 ERR 时 nextActions 必须有 required 项，不能显示 nothing required；说明性信息要放在 NEXT ACTIONS 之前
+- Pitfall: validation.ci_configs 免掉了 unmapped，所以 verify 必须检查它们：每个文件都存在，且至少一个还有 harness-kit … ci 调用（文本匹配）
+- Pitfall: doctor 对“空跑”只报 WARN：path_glob 匹配 0 个文件、不带 base 的 git diff --check（无 revision 或只有 HEAD）；判断不了的写法（变量、命令替换、范围）一律当作有 base
 
 ## bundled-skills — onboard / check-loop 技能的定位、输出与维护
 - Entry: `src/skill.ts`

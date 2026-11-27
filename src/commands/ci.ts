@@ -1,5 +1,8 @@
 import { CiConfigError, detectCiBase, NO_BASE_MESSAGE, prepareCiBase, type CiBase, type CiBaseSource, type CiHistory } from "../ci";
 import { locateHarnessTargets } from "../delivery";
+import { capabilitiesWithoutDiffBase, diffCheckWithoutBaseMessage } from "../diff-check";
+import { GIT_REQUIRES, gitVersionProblem, gitVersionText } from "../git";
+import { loadManifest } from "../manifest";
 import type { Gap } from "../planner";
 import type { CheckEvidence } from "../validation-state";
 import { err, info, ok, warn } from "../util";
@@ -17,7 +20,13 @@ export interface CiOpts {
   remote?: string;
   profile?: string;
   json?: boolean;
-  /** Test seam; defaults to process.env. */
+  /**
+   * Start the repository's checks (run-checks capabilities, verify's check and
+   * snapshot commands) without the host's system and global / XDG git config.
+   * ci's own git calls keep it: fetching may need the host's URL rewrites.
+   */
+  isolateCheckGitConfig?: boolean;
+  /** Test seam for the CI variables; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -28,6 +37,12 @@ export interface CiReport {
   exitCode: 0 | 1 | 2;
   /** Set when status is error: why the change could not be judged. */
   errorKind: string | null;
+  git: {
+    /** The git on PATH, e.g. "2.47.3"; null when it did not run. */
+    version: string | null;
+    /** host: checks inherit the host's git config; isolated: --isolate-check-git-config. */
+    checkConfig: "host" | "isolated";
+  };
   base: {
     source: CiBaseSource | null;
     value: string | null;
@@ -44,6 +59,8 @@ export interface CiReport {
   runChecks: RunChecksReport | null;
   verifyPassed: boolean | null;
   verify: VerifyReport | null;
+  /** Problems with how the change was judged that do not change the verdict, e.g. a selected check that cannot see the change. */
+  warnings: string[];
   errors: string[];
 }
 
@@ -56,6 +73,7 @@ function emptyReport(): CiReport {
     ok: false,
     exitCode: CI_EXIT.error,
     errorKind: null,
+    git: { version: null, checkConfig: "host" },
     base: { source: null, value: null, ref: null, commit: null, mergeBase: null, head: null },
     history: null,
     changed: [],
@@ -64,6 +82,7 @@ function emptyReport(): CiReport {
     runChecks: null,
     verifyPassed: null,
     verify: null,
+    warnings: [],
     errors: [],
   };
 }
@@ -77,8 +96,11 @@ function seconds(ms: number): string {
 }
 
 function reportHuman(report: CiReport): void {
-  const { base, history } = report;
+  const { base, history, git } = report;
   info(`harness-kit ci — base ${base.value ?? "(none)"}${base.source ? ` from ${base.source}` : ""}`);
+  info(
+    `  git: ${git.version ?? "(did not run)"}; checks ${git.checkConfig === "isolated" ? "run without the host's system / global / XDG git config" : "inherit the host's git config"}`,
+  );
   if (base.commit)
     info(`  base: ${base.ref} ${short(base.commit)}; merge-base ${short(base.mergeBase)}; HEAD ${short(base.head)}`);
   if (history) {
@@ -103,6 +125,7 @@ function reportHuman(report: CiReport): void {
       for (const line of failure.logTail.split("\n")) if (line) info(`       ${line}`);
     } else err(`${check.id}: NOT RUN — ${run?.skipped.find((item) => item.id === check.id)?.reason ?? "not run"}`);
   }
+  for (const warning of report.warnings) warn(warning);
   for (const gap of report.blockingGaps) {
     err(`[${gap.kind}] ${gap.where ? `${gap.where} — ` : ""}${gap.why}`);
     info(`       -> ${gap.suggestion}`);
@@ -150,6 +173,13 @@ export function ciCmd(repo: string, opts: CiOpts = {}): number {
 function ciInternal(repo: string, opts: CiOpts): number {
   const report = emptyReport();
   const environment = opts.env ?? process.env;
+  // Checked first: an old git rejects flags ci relies on, and that would read as "no history".
+  const probe = gitVersionText();
+  report.git = { version: probe.text?.replace(/^git version /, "") ?? null, checkConfig: opts.isolateCheckGitConfig ? "isolated" : "host" };
+  const gitProblem =
+    gitVersionProblem(GIT_REQUIRES.core, "harness-kit ci", probe) ??
+    (opts.isolateCheckGitConfig ? gitVersionProblem(GIT_REQUIRES.configGlobal, "--isolate-check-git-config", probe) : null);
+  if (gitProblem) return configError(report, gitProblem.kind, gitProblem.message, opts.json);
   const targets = locateHarnessTargets(repo);
   if (!targets.adopted) {
     const where = targets.enclosing ? `; run ci with --repo ${targets.enclosing}` : "";
@@ -181,6 +211,7 @@ function ciInternal(repo: string, opts: CiOpts): number {
       allowEmptyAsNoChange: true,
       profile: opts.profile,
       record: false,
+      isolateGitConfig: opts.isolateCheckGitConfig,
       json: true,
     }),
   );
@@ -188,7 +219,13 @@ function ciInternal(repo: string, opts: CiOpts): number {
   // Freshness already stale on the merge-base is the target branch's
   // maintenance, not this change's failure: the same rule deliver applies.
   const verify = captureStdout(() =>
-    verifyCmd(repo, { recordManualEvidence: false, json: true, contextBase: base.mergeBase, budgetMs: VERIFY_BUDGET_MS }),
+    verifyCmd(repo, {
+      recordManualEvidence: false,
+      json: true,
+      contextBase: base.mergeBase,
+      budgetMs: VERIFY_BUDGET_MS,
+      isolateGitConfig: opts.isolateCheckGitConfig,
+    }),
   );
   report.runChecks = runReport;
   report.verify = parseVerifyReport(verify.output);
@@ -200,6 +237,13 @@ function ciInternal(repo: string, opts: CiOpts): number {
   }
   report.changed = runReport.changed;
   report.checks = runReport.checks;
+  // A check that passes on a clean checkout without looking at the change is not evidence.
+  try {
+    for (const id of capabilitiesWithoutDiffBase(loadManifest(repo)))
+      if (report.checks.some((check) => check.id === id)) report.warnings.push(diffCheckWithoutBaseMessage(id));
+  } catch {
+    // run-checks already reported an unreadable manifest.
+  }
   report.blockingGaps = runReport.gaps.filter((gap) => gap.severity === "blocking");
   if (runReport.gaps.some((gap) => gap.kind === "diff-unavailable")) {
     report.errorKind = "diff-unavailable";

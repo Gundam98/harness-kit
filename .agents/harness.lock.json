@@ -1,9 +1,10 @@
 {
   "schema": "ai-harness/upgrade-state/v1",
   "package": "@erzhe/harness-kit",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "manifestSpec": "ai-harness/v0",
   "appliedMigrations": [
-    "upgrade-state-v1"
+    "upgrade-state-v1",
+    "diff-check-task-base-v1"
   ]
 }

@@ -122,6 +122,19 @@ test("the CI examples check out full history, use Node 18+, and call ci pinned b
   for (const text of [githubRun, gitlab.script.join("\n")]) assert.doesNotMatch(text, /@latest|harness-kit ci(?!")/);
 });
 
+test("the CI examples say which git ci needs and how to keep host git config from the checks", () => {
+  const readme = readFileSync(join(ROOT, "examples", "ci", "README.md"), "utf8");
+  assert.match(readme, /The job image needs git 2\.24 or later/);
+  assert.match(readme, /## Host git config and the checks/);
+  assert.match(readme, /`--isolate-check-git-config` \(git 2\.32 or later\)/);
+  assert.match(readme, /ci --no-fetch\n```/, "the fallback for older git fetches first, then runs ci without fetching");
+  for (const file of ["github-actions.yml", "gitlab-ci.yml"]) {
+    const text = readFileSync(join(ROOT, "examples", "ci", file), "utf8");
+    assert.match(text, /git 2\.24 or later/, file);
+    assert.match(text, /--isolate-check-git-config\s+(?:#\s+)?\(git 2\.32 or later/, file);
+  }
+});
+
 test("the CI examples' version line reads the lock", () => {
   const repo = mkdtempSync(join(tmpdir(), "hk-ci-example-"));
   mkdirSync(join(repo, ".agents"));

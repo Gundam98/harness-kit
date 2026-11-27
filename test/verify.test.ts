@@ -441,3 +441,39 @@ test("verify reports outdated manual evidence before its NEXT ACTIONS, as inform
   assert.ok(info < result.stdout.indexOf("NEXT ACTIONS"), "stated before NEXT ACTIONS, not after the verdict");
   assert.doesNotMatch(result.stdout, /WARN manual run-checks evidence no longer matches/);
 });
+
+test("verify keeps declared CI configs honest: they exist and one of them still runs harness-kit ci", () => {
+  const repo = mkdtempSync(join(tmpdir(), "hk-verify-ci-configs-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  write(
+    repo,
+    ".agents/manifest.yaml",
+    "spec: ai-harness/v0\nidentity: { name: ci, summary: ci configs }\nvalidation:\n  ci_configs: [.github/workflows/harness.yml, ci/harness.sh]\n",
+  );
+  syncCmd(repo, { createEntry: true });
+  const errors = (body: any) => body.messages.filter((message: any) => message.level === "error").map((message: any) => message.text);
+
+  const missing = runVerify(repo);
+  assert.equal(missing.status, 1);
+  assert.ok(errors(missing.body).includes("validation.ci_configs: .github/workflows/harness.yml is missing"), JSON.stringify(errors(missing.body)));
+
+  // A workflow that delegates to a script: together they still run the gate.
+  write(repo, ".github/workflows/harness.yml", "jobs:\n  harness:\n    steps:\n      - run: bash ci/harness.sh\n");
+  write(repo, "ci/harness.sh", 'version="$(node -p "require(\'./.agents/harness.lock.json\').version")"\nnpx -y "@erzhe/harness-kit@${version}" ci --isolate-check-git-config\n');
+  const delegated = runVerify(repo);
+  assert.equal(delegated.status, 0, JSON.stringify(errors(delegated.body)));
+  assert.ok(delegated.body.messages.some((message: any) => message.level === "ok" && message.text === "ci/harness.sh runs harness-kit ci"));
+
+  // Every declared file must exist, even when another one still runs the gate.
+  unlinkSync(join(repo, ".github/workflows/harness.yml"));
+  const partly = runVerify(repo);
+  assert.equal(partly.status, 1);
+  assert.deepEqual(errors(partly.body), ["validation.ci_configs: .github/workflows/harness.yml is missing"]);
+  write(repo, ".github/workflows/harness.yml", "jobs:\n  harness:\n    steps:\n      - run: bash ci/harness.sh\n");
+
+  // The gate was dropped from every declared file.
+  write(repo, "ci/harness.sh", "npm test\n# harness-kit cinema is not the gate\n");
+  const removed = runVerify(repo);
+  assert.equal(removed.status, 1);
+  assert.ok(errors(removed.body).some((text: string) => /none of validation\.ci_configs runs `harness-kit \.\.\. ci`/.test(text)));
+});
